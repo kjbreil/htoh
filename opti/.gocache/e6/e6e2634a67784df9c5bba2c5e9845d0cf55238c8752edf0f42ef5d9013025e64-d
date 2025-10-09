@@ -1,0 +1,5 @@
+./ffprobe.go
+./progress.go
+./runner.go
+./state.go
+./swap_inplace.go
