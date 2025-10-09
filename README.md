@@ -1,6 +1,6 @@
 # opti
 
-`opti` (v0.3.2) scans a directory of H.264 / AVC videos, transcodes them to H.265 / HEVC with `ffmpeg`, and keeps track of progress so long-running batches can resume safely. It ships with a live terminal dashboard, parallel workers, and optional in-place swapping once a transcode finishes.
+`opti` (v0.3.3) scans a directory of H.264 / AVC videos, transcodes them to H.265 / HEVC with `ffmpeg`, and keeps track of progress so long-running batches can resume safely. It ships with a live terminal dashboard, parallel workers, and optional in-place swapping once a transcode finishes.
 
 ## Features
 - Automatic file discovery with `ffprobe`, limited to H.264 footage.
@@ -11,6 +11,7 @@
 - Quick inspection flag (`-list-hw`) to surface HEVC-capable hardware accelerators and encoders that `ffmpeg` detects on the host.
 - `--swap-inplace` mode that safely replaces the source with the transcoded output while keeping a `.original` backup.
 - Optional debug logging (`-debug`) to trace discovery/probing, custom `ffprobe` path selection, and MP4 container/`+faststart` controls for streaming-friendly outputs.
+- A `-fast` switch that biases the adaptive quality table one step toward smaller files when you need extra savings.
 - Adaptive quality heuristics that inspect the source bitrate, resolution, and frame rate to pick per-engine quality targets (CRF / ICQ / CQ), tuned to aim for roughly a 50 % size reduction while biasing toward safe visual quality.
 
 ## Requirements
@@ -156,6 +157,7 @@ opti -s <source-dir> -w <work-dir> [options]
 | `-list-hw` | Print available `-engine` options, hardware accelerators, and HEVC hardware encoders detected by `ffmpeg`, then exit. | `false` |
 | `-output-mp4` | Force every output to MP4 and add `-movflags +faststart` for streamable files. | `false` |
 | `-faststart-mp4` | Keep MP4 sources in MP4 (instead of MKV) and add `-movflags +faststart`; other inputs still land in MKV. | `false` |
+| `-fast` | Shift the quality heuristics one notch toward smaller files across all engines. | `false` |
 | `--swap-inplace` | After a successful encode, rename the source to `<name>.original` and move the output back to the original location. | `false` |
 | `-version` | Print version information and exit. | `false` |
 
@@ -163,7 +165,7 @@ opti -s <source-dir> -w <work-dir> [options]
 1. The source directory is walked and video files (`.mkv`, `.mp4`, `.mov`, `.m4v`) are probed with `ffprobe`. Only H.264/AVC videos are queued.  
 2. Discovered files are recorded in `work/.hevc_state.tsv` with their status (`queued`, `processing`, `done`, `failed`). This allows `opti` to resume automatically if you restart it later.  
 3. Each worker calls `ffmpeg` with `-progress pipe:1` and feeds progress updates into the dashboard.  
-4. Finished encodes are written under the work directory, preserving the relative path and appending `.hevc.mkv` by default. Use `-output-mp4` to force `.hevc.mp4` and `-faststart-mp4` to keep MP4 inputs in MP4 while leaving other codecs in MKV. Before launching `ffmpeg`, opti inspects the probed stream to estimate bits-per-pixel and chooses engine-specific quality targets so HEVC outputs stay close to the original quality without runaway file sizes.  
+4. Finished encodes are written under the work directory, preserving the relative path and appending `.hevc.mkv` by default. Use `-output-mp4` to force `.hevc.mp4` and `-faststart-mp4` to keep MP4 inputs in MP4 while leaving other codecs in MKV. Before launching `ffmpeg`, opti inspects the probed stream to estimate bits-per-pixel and chooses engine-specific quality targets so HEVC outputs stay close to the original quality without runaway file sizes; add `-fast` if you want the heuristics to lean another step toward smaller encodes.  
 5. With `--swap-inplace`, the tool renames the source file to `<name>.original` and moves the encoded file back to `<name>` (falling back to a copy if the directories are on different filesystems).  
 
 Interrupting the program (Ctrl+C) allows in-flight workers to finish their current tick. Re-running the command will skip everything marked `done` in the state file.

@@ -23,11 +23,12 @@ var (
 	debugLogging = flag.Bool("debug", false, "Enable verbose logging (file discovery, ffprobe calls)")
 	forceMP4     = flag.Bool("output-mp4", false, "Force outputs to MP4 container with -movflags +faststart")
 	faststartMP4 = flag.Bool("faststart-mp4", false, "Keep MP4 container when source is MP4 and add -movflags +faststart")
+	fastMode     = flag.Bool("fast", false, "Favor smaller files by lowering quality targets one notch across all engines")
 	listHW       = flag.Bool("list-hw", false, "Detect and print available hardware accelerators/encoders, then exit")
 	version      = flag.Bool("version", false, "Print version and exit")
 )
 
-const Version = "0.3.2"
+const Version = "0.3.3"
 
 func main() {
 	swapInplace := flag.Bool("swap-inplace", false, "After a successful transcode, rename the source to <name.ext>.original and copy the new file back to the original path (same name/ext).")
@@ -74,6 +75,7 @@ func main() {
 		Debug:        *debugLogging,
 		ForceMP4:     *forceMP4,
 		FaststartMP4: *faststartMP4,
+		FastMode:     *fastMode,
 		SwapInplace:  *swapInplace,
 	}
 	if err := runner.Run(context.Background(), cfg); err != nil {

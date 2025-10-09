@@ -30,6 +30,7 @@ type Config struct {
 	Debug        bool
 	ForceMP4     bool
 	FaststartMP4 bool
+	FastMode     bool
 	SwapInplace  bool
 }
 
@@ -149,7 +150,7 @@ func Run(ctx context.Context, cfg Config) error {
 			container = "mp4"
 		}
 		faststart := container == "mp4"
-		qChoice := deriveQualityChoice(pi.info)
+		qChoice := deriveQualityChoice(pi.info, cfg.FastMode)
 		ext := ".hevc.mkv"
 		if container == "mp4" {
 			ext = ".hevc.mp4"
@@ -255,13 +256,16 @@ func listCandidates(ctx context.Context, ffprobePath, root string, st *State, de
 	return out, err
 }
 
-func deriveQualityChoice(info *ProbeInfo) qualityChoice {
+func deriveQualityChoice(info *ProbeInfo, fast bool) qualityChoice {
 	base := 22
 	var bpp float64
 	var bitrate int64
 	if info != nil {
 		bitrate = info.BitRate
 		base, bpp = estimateQualityLevel(info)
+	}
+	if fast {
+		base++
 	}
 	crf := clampRange(base, 16, 35)
 	icq := clampRange(base-1, 1, 51)
