@@ -1,6 +1,6 @@
 # opti
 
-`htoh` scans a directory of H.264 / AVC videos, transcodes them to H.265 / HEVC with `ffmpeg`, and keeps track of progress so long-running batches can resume safely. It ships with a live terminal dashboard, parallel workers, and optional in-place swapping once a transcode finishes.
+`opti` scans a directory of H.264 / AVC videos, transcodes them to H.265 / HEVC with `ffmpeg`, and keeps track of progress so long-running batches can resume safely. It ships with a live terminal dashboard, parallel workers, and optional in-place swapping once a transcode finishes.
 
 ## Features
 - Automatic file discovery with `ffprobe`, limited to H.264 footage.
@@ -23,11 +23,15 @@ Clone the project and build the binary:
 ```bash
 git clone <repo-url> opti
 cd opti
-GOCACHE=$(pwd)/.gocache go build ./...
+GOCACHE=$(pwd)/.gocache go build -o ./bin/opti ./cmd/opti
 # or: make build
 ```
 
-The compiled binary will be at `./cmd/opti/opti` when using `go build`, or `./bin/opti` when using the provided `Makefile`.
+The compiled binary will be at `./bin/opti`. On Windows PowerShell use:
+
+```powershell
+go build -o .\bin\opti.exe .\cmd\opti
+```
 
 You can also install straight into your `GOBIN` for everyday use:
 
@@ -114,8 +118,8 @@ The sections below outline how to prepare common operating systems for building 
 4. Open the `opti` project in GoLand. Under **File ▸ Settings ▸ Go ▸ GOROOT**, point to `C:\Go`, and configure a run configuration targeting `.\cmd\opti`.  
 5. When running inside PowerShell or GoLand, use:
    ```powershell
-   go build ./...
-   .\cmd\opti\opti.exe -s D:\Media\Source -w D:\Media\Work
+   go build -o .\bin\opti.exe .\cmd\opti
+   .\bin\opti.exe -s D:\Media\Source -w D:\Media\Work
    ```
    The ANSI progress table renders correctly in Windows Terminal and recent PowerShell builds; classic `cmd.exe` may display escape codes unless `VirtualTerminalLevel` is enabled.
 
@@ -186,9 +190,9 @@ opti -s /mnt/videos -w /mnt/opti/work -j 3 \
 opti -ffmpeg /usr/local/bin/ffmpeg -list-hw
 ```
 
-_on Windows PowerShell, use `opti.exe` and Windows-style paths:_
+_On Windows PowerShell, use the binary in `.\bin`:_
 ```powershell
-.\opti.exe -s D:\Media\Source -w D:\Media\Work
+.\bin\opti.exe -s D:\Media\Source -w D:\Media\Work
 ```
 
 ## Development
