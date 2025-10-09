@@ -1,6 +1,6 @@
 # opti
 
-`opti` scans a directory of H.264 / AVC videos, transcodes them to H.265 / HEVC with `ffmpeg`, and keeps track of progress so long-running batches can resume safely. It ships with a live terminal dashboard, parallel workers, and optional in-place swapping once a transcode finishes.
+`htoh` scans a directory of H.264 / AVC videos, transcodes them to H.265 / HEVC with `ffmpeg`, and keeps track of progress so long-running batches can resume safely. It ships with a live terminal dashboard, parallel workers, and optional in-place swapping once a transcode finishes.
 
 ## Features
 - Automatic file discovery with `ffprobe`, limited to H.264 footage.
