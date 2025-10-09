@@ -219,6 +219,22 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 			"-c:s", "copy",
 			jb.OutTarget,
 		}
+	case "nvenc", "hevc_nvenc":
+		args = []string{
+			"-hide_banner",
+			"-v", "error",
+			"-progress", "pipe:1",
+			"-i", jb.Src,
+			"-map", "0",
+			"-c:v", "hevc_nvenc",
+			"-preset", "medium",
+			"-rc:v", "vbr",
+			"-cq", "23",
+			"-b:v", "0",
+			"-c:a", "copy",
+			"-c:s", "copy",
+			jb.OutTarget,
+		}
 	default:
 		args = []string{
 			"-hide_banner",

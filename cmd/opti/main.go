@@ -23,7 +23,7 @@ var (
 	version     = flag.Bool("version", false, "Print version and exit")
 )
 
-const Version = "0.2.0"
+const Version = "0.2.1"
 
 func main() {
 	swapInplace := flag.Bool("swap-inplace", false, "After a successful transcode, rename the source to <name.ext>.original and copy the new file back to the original path (same name/ext).")
