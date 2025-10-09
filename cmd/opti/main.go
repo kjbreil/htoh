@@ -19,6 +19,7 @@ var (
 	workers     = flag.Int("j", 1, "Parallel workers")
 	engine      = flag.String("engine", "cpu", "Engine: cpu|qsv")
 	ffmpegPath  = flag.String("ffmpeg", "ffmpeg", "Path to ffmpeg binary")
+	listHW      = flag.Bool("list-hw", false, "Detect and print available hardware accelerators/encoders, then exit")
 	version     = flag.Bool("version", false, "Print version and exit")
 )
 
@@ -30,6 +31,17 @@ func main() {
 	if *version {
 		fmt.Println("opti", Version)
 		return
+	}
+	if *listHW {
+		if err := runner.PrintHardwareCaps(*ffmpegPath); err != nil {
+			fmt.Fprintln(os.Stderr, "opti:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if err := runner.ValidateEngine(*engine, *ffmpegPath); err != nil {
+		fmt.Fprintln(os.Stderr, "opti:", err)
+		os.Exit(1)
 	}
 	if *sourceDir == "" || *workDir == "" {
 		fmt.Fprintln(os.Stderr, "usage: -s <source> -w <workdir> [options]")
