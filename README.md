@@ -105,6 +105,20 @@ The sections below outline how to prepare common operating systems for building 
 3. Open the project in GoLand. The IDE will auto-detect `/usr/local/go` or the Homebrew Go in `/opt/homebrew/opt/go/libexec` on Apple Silicon.
 4. In **Run Configurations**, select `Package`, set the package path to `opti.local/opti/cmd/opti`, and add any environment overrides (`GOCACHE`, `FFMPEG`, etc.).
 
+### Windows 10 / 11
+1. Install Go from the official MSI installer: [https://go.dev/dl/](https://go.dev/dl/).  
+   Accept the default `C:\Go` location and ensure the installer updates `PATH`.
+2. Download a static `ffmpeg` build (e.g., from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)) and extract it to `C:\ffmpeg`.  
+   Add `C:\ffmpeg\bin` to your user `PATH` so both `ffmpeg.exe` and `ffprobe.exe` are discoverable.
+3. Install GoLand using JetBrains Toolbox or the standalone installer.  
+4. Open the `opti` project in GoLand. Under **File ▸ Settings ▸ Go ▸ GOROOT**, point to `C:\Go`, and configure a run configuration targeting `.\cmd\opti`.  
+5. When running inside PowerShell or GoLand, use:
+   ```powershell
+   go build ./...
+   .\cmd\opti\opti.exe -s D:\Media\Source -w D:\Media\Work
+   ```
+   The ANSI progress table renders correctly in Windows Terminal and recent PowerShell builds; classic `cmd.exe` may display escape codes unless `VirtualTerminalLevel` is enabled.
+
 ### Common GoLand configuration steps
 - **Formatting & Imports**: Enable `goimports` or `gofmt` under **File ▸ Settings ▸ Go ▸ Imports and Formatting** so files are formatted on save.  
 - **External Tools**: Add `go test ./...` and `make build` as external tools for quick access.  
@@ -170,6 +184,11 @@ opti -s /mnt/videos -w /mnt/opti/work -j 3 \
 ### Inspect hardware support without running a job
 ```bash
 opti -ffmpeg /usr/local/bin/ffmpeg -list-hw
+```
+
+_on Windows PowerShell, use `opti.exe` and Windows-style paths:_
+```powershell
+.\opti.exe -s D:\Media\Source -w D:\Media\Work
 ```
 
 ## Development
