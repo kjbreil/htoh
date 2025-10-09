@@ -88,10 +88,11 @@ func engineOptionsFromEncoders(encoders string) []EngineInfo {
 	out := []EngineInfo{
 		{Name: "cpu", Description: "Software (libx265)"},
 	}
-	if strings.Contains(encoders, "hevc_qsv") {
+	lower := strings.ToLower(encoders)
+	if strings.Contains(lower, "hevc_qsv") {
 		out = append(out, EngineInfo{Name: "qsv", Description: "Intel Quick Sync (hevc_qsv)"})
 	}
-	if strings.Contains(encoders, "hevc_nvenc") {
+	if strings.Contains(lower, "hevc_nvenc") {
 		out = append(out, EngineInfo{Name: "nvenc", Description: "NVIDIA NVENC (hevc_nvenc)"})
 	}
 	return out
