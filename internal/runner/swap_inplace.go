@@ -1,0 +1,52 @@
+package runner
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+)
+
+// SwapInPlaceCopy moves the freshly transcoded file back to the source location,
+// renaming the original file to *.original as a backup. If the rename fails due to
+// cross-filesystem boundaries, fall back to copy semantics and leave the temp file removed.
+func SwapInPlaceCopy(srcPath, newPath string) error {
+	origBackup := srcPath + ".original"
+	if err := os.Rename(srcPath, origBackup); err != nil {
+		return fmt.Errorf("rename original -> .original failed: %w", err)
+	}
+
+	if err := os.Rename(newPath, srcPath); err == nil {
+		return nil
+	}
+
+	if err := copyFileContents(newPath, srcPath); err != nil {
+		// best-effort rollback; ignore failure if someone already restored it
+		_ = os.Rename(origBackup, srcPath)
+		return fmt.Errorf("copy new -> original path failed: %w", err)
+	}
+	_ = os.Remove(newPath)
+	return nil
+}
+
+func copyFileContents(from, to string) error {
+	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
+		return err
+	}
+	src, err := os.Open(from)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	dst, err := os.Create(to)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dst.Close() }()
+
+	if _, err = io.Copy(dst, src); err != nil {
+		return err
+	}
+	return dst.Sync()
+}
