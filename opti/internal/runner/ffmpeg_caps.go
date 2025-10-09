@@ -88,11 +88,23 @@ func engineOptionsFromEncoders(encoders string) []EngineInfo {
 	out := []EngineInfo{
 		{Name: "cpu", Description: "Software (libx265)"},
 	}
-	lower := strings.ToLower(encoders)
-	if strings.Contains(lower, "hevc_qsv") {
+	var (
+		hasQSV   bool
+		hasNVENC bool
+	)
+	for _, line := range filterHEVCHardwareEncoders(encoders) {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "hevc_qsv") {
+			hasQSV = true
+		}
+		if strings.Contains(lower, "hevc_nvenc") {
+			hasNVENC = true
+		}
+	}
+	if hasQSV {
 		out = append(out, EngineInfo{Name: "qsv", Description: "Intel Quick Sync (hevc_qsv)"})
 	}
-	if strings.Contains(lower, "hevc_nvenc") {
+	if hasNVENC {
 		out = append(out, EngineInfo{Name: "nvenc", Description: "NVIDIA NVENC (hevc_nvenc)"})
 	}
 	return out
