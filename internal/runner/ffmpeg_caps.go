@@ -40,8 +40,8 @@ func PrintHardwareCaps(ffmpegPath string) error {
 	fmt.Println(strings.TrimSpace(accels))
 	fmt.Println()
 
-	fmt.Println("Likely hardware-backed encoders (filtered from ffmpeg -encoders):")
-	hwEnc := filterHardwareEncoders(encoders)
+	fmt.Println("HEVC hardware encoders detected (from ffmpeg -encoders):")
+	hwEnc := filterHEVCHardwareEncoders(encoders)
 	for _, line := range hwEnc {
 		fmt.Println("  " + line)
 	}
@@ -106,7 +106,7 @@ func runFFmpegCapture(ffmpeg string, args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
-func filterHardwareEncoders(output string) []string {
+func filterHEVCHardwareEncoders(output string) []string {
 	var out []string
 	hwTokens := []string{
 		"_nvenc",
@@ -128,6 +128,9 @@ func filterHardwareEncoders(output string) []string {
 			continue
 		}
 		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "hevc") && !strings.Contains(lower, "h265") {
+			continue
+		}
 		for _, token := range hwTokens {
 			if strings.Contains(lower, token) {
 				out = append(out, line)

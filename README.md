@@ -1,6 +1,6 @@
 # opti
 
-`opti` scans a directory of H.264 / AVC videos, transcodes them to H.265 / HEVC with `ffmpeg`, and keeps track of progress so long-running batches can resume safely. It ships with a live terminal dashboard, parallel workers, and optional in-place swapping once a transcode finishes.
+`htoh` scans a directory of H.264 / AVC videos, transcodes them to H.265 / HEVC with `ffmpeg`, and keeps track of progress so long-running batches can resume safely. It ships with a live terminal dashboard, parallel workers, and optional in-place swapping once a transcode finishes.
 
 ## Features
 - Automatic file discovery with `ffprobe`, limited to H.264 footage.
@@ -8,7 +8,7 @@
 - Live progress table that refreshes a few times a second.
 - Persistent state file (`.hevc_state.tsv` in the work directory) to allow resuming after interruptions.
 - Optional interactive confirmation and a silent mode for unattended runs.
-- Quick inspection flag (`-list-hw`) to surface hardware accelerators and encoders that `ffmpeg` detects on the host.
+- Quick inspection flag (`-list-hw`) to surface HEVC-capable hardware accelerators and encoders that `ffmpeg` detects on the host.
 - `--swap-inplace` mode that safely replaces the source with the transcoded output while keeping a `.original` backup.
 
 ## Requirements
@@ -131,7 +131,7 @@ opti -s <source-dir> -w <work-dir> [options]
 | `-I` | Interactive mode—asks for confirmation before processing batch. | `false` |
 | `-S` | Silent mode—suppresses the live dashboard and most logs. | `false` |
 | `-k` | Reserved flag for keeping intermediates. Currently ignored. | `false` |
-| `-list-hw` | Print available `-engine` options, hardware accelerators, and likely hardware encoders detected by `ffmpeg`, then exit. | `false` |
+| `-list-hw` | Print available `-engine` options, hardware accelerators, and HEVC hardware encoders detected by `ffmpeg`, then exit. | `false` |
 | `--swap-inplace` | After a successful encode, rename the source to `<name>.original` and move the output back to the original location. | `false` |
 | `-version` | Print version information and exit. | `false` |
 
