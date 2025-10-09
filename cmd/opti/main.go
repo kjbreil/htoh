@@ -11,19 +11,23 @@ import (
 )
 
 var (
-	sourceDir   = flag.String("s", "", "Source directory of videos")
-	workDir     = flag.String("w", "", "Working directory (temp/state & outputs)")
-	interactive = flag.Bool("I", false, "Interactive (prompt) mode")
-	keep        = flag.Bool("k", false, "Keep intermediates (reserved)")
-	silent      = flag.Bool("S", false, "Silent (less console output)")
-	workers     = flag.Int("j", 1, "Parallel workers")
-	engine      = flag.String("engine", "cpu", "Engine: cpu|qsv")
-	ffmpegPath  = flag.String("ffmpeg", "ffmpeg", "Path to ffmpeg binary")
-	listHW      = flag.Bool("list-hw", false, "Detect and print available hardware accelerators/encoders, then exit")
-	version     = flag.Bool("version", false, "Print version and exit")
+	sourceDir    = flag.String("s", "", "Source directory of videos")
+	workDir      = flag.String("w", "", "Working directory (temp/state & outputs)")
+	interactive  = flag.Bool("I", false, "Interactive (prompt) mode")
+	keep         = flag.Bool("k", false, "Keep intermediates (reserved)")
+	silent       = flag.Bool("S", false, "Silent (less console output)")
+	workers      = flag.Int("j", 1, "Parallel workers")
+	engine       = flag.String("engine", "cpu", "Engine: cpu|qsv|nvenc")
+	ffmpegPath   = flag.String("ffmpeg", "ffmpeg", "Path to ffmpeg binary")
+	ffprobePath  = flag.String("ffprobe", "", "Path to ffprobe binary (defaults to sibling of -ffmpeg or system ffprobe)")
+	debugLogging = flag.Bool("debug", false, "Enable verbose logging (file discovery, ffprobe calls)")
+	forceMP4     = flag.Bool("output-mp4", false, "Force outputs to MP4 container with -movflags +faststart")
+	faststartMP4 = flag.Bool("faststart-mp4", false, "Keep MP4 container when source is MP4 and add -movflags +faststart")
+	listHW       = flag.Bool("list-hw", false, "Detect and print available hardware accelerators/encoders, then exit")
+	version      = flag.Bool("version", false, "Print version and exit")
 )
 
-const Version = "0.2.1"
+const Version = "0.3.2"
 
 func main() {
 	swapInplace := flag.Bool("swap-inplace", false, "After a successful transcode, rename the source to <name.ext>.original and copy the new file back to the original path (same name/ext).")
@@ -58,15 +62,19 @@ func main() {
 	_ = time.Hour
 
 	cfg := runner.Config{
-		SourceDir:   *sourceDir,
-		WorkDir:     *workDir,
-		Interactive: *interactive,
-		Keep:        *keep,
-		Silent:      *silent,
-		Workers:     *workers,
-		Engine:      *engine,
-		FFmpegPath:  *ffmpegPath,
-		SwapInplace: *swapInplace,
+		SourceDir:    *sourceDir,
+		WorkDir:      *workDir,
+		Interactive:  *interactive,
+		Keep:         *keep,
+		Silent:       *silent,
+		Workers:      *workers,
+		Engine:       *engine,
+		FFmpegPath:   *ffmpegPath,
+		FFprobePath:  *ffprobePath,
+		Debug:        *debugLogging,
+		ForceMP4:     *forceMP4,
+		FaststartMP4: *faststartMP4,
+		SwapInplace:  *swapInplace,
 	}
 	if err := runner.Run(context.Background(), cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "opti:", err)

@@ -18,15 +18,27 @@ import (
 )
 
 type Config struct {
-	SourceDir   string
-	WorkDir     string
-	Interactive bool
-	Keep        bool
-	Silent      bool
-	Workers     int
-	Engine      string // cpu|qsv
-	FFmpegPath  string
-	SwapInplace bool
+	SourceDir    string
+	WorkDir      string
+	Interactive  bool
+	Keep         bool
+	Silent       bool
+	Workers      int
+	Engine       string // cpu|qsv|nvenc
+	FFmpegPath   string
+	FFprobePath  string
+	Debug        bool
+	ForceMP4     bool
+	FaststartMP4 bool
+	SwapInplace  bool
+}
+
+type qualityChoice struct {
+	CRF           int
+	ICQ           int
+	CQ            int
+	SourceBitrate int64
+	BitsPerPixel  float64
 }
 
 type job struct {
@@ -34,6 +46,9 @@ type job struct {
 	Rel       string
 	Probe     *ProbeInfo
 	OutTarget string
+	Container string
+	Faststart bool
+	Quality   qualityChoice
 }
 
 func Run(ctx context.Context, cfg Config) error {
@@ -45,15 +60,21 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("load state: %w", err)
 	}
 
-	ffprobePath := "ffprobe"
-	if p := findSibling(cfg.FFmpegPath, "ffprobe"); p != "" {
-		ffprobePath = p
+	ffprobePath := strings.TrimSpace(cfg.FFprobePath)
+	if ffprobePath == "" {
+		ffprobePath = "ffprobe"
+		if p := findSibling(cfg.FFmpegPath, "ffprobe"); p != "" {
+			ffprobePath = p
+		}
+	}
+	if cfg.Debug {
+		fmt.Printf("Using ffprobe: %s\n", ffprobePath)
 	}
 
 	if !cfg.Silent {
 		fmt.Println("Indexing files (scanning and probing H.264)…")
 	}
-	files, err := listCandidates(ctx, ffprobePath, cfg.SourceDir, state)
+	files, err := listCandidates(ctx, ffprobePath, cfg.SourceDir, state, cfg.Debug)
 	if err != nil {
 		return err
 	}
@@ -122,8 +143,37 @@ func Run(ctx context.Context, cfg Config) error {
 		if err != nil {
 			rel = filepath.Base(pi.path)
 		}
-		out := filepath.Join(cfg.WorkDir, rel) + ".hevc.mkv"
-		jobs <- job{Src: pi.path, Rel: rel, Probe: pi.info, OutTarget: out}
+		base := filepath.Join(cfg.WorkDir, rel)
+		container := "mkv"
+		if cfg.ForceMP4 || (cfg.FaststartMP4 && strings.EqualFold(filepath.Ext(pi.path), ".mp4")) {
+			container = "mp4"
+		}
+		faststart := container == "mp4"
+		qChoice := deriveQualityChoice(pi.info)
+		ext := ".hevc.mkv"
+		if container == "mp4" {
+			ext = ".hevc.mp4"
+		}
+		out := base + ext
+		if cfg.Debug {
+			fmt.Printf("[queue] %s -> %s (container=%s, src=%.2f Mbps, bpp=%.4f, crf=%d, icq=%d, cq=%d)\n",
+				pi.path, out, container,
+				float64(qChoice.SourceBitrate)/1_000_000.0,
+				qChoice.BitsPerPixel,
+				qChoice.CRF,
+				qChoice.ICQ,
+				qChoice.CQ,
+			)
+		}
+		jobs <- job{
+			Src:       pi.path,
+			Rel:       rel,
+			Probe:     pi.info,
+			OutTarget: out,
+			Container: container,
+			Faststart: faststart,
+			Quality:   qChoice,
+		}
 	}
 	close(jobs)
 
@@ -155,8 +205,11 @@ type candidate struct {
 	info *ProbeInfo
 }
 
-func listCandidates(ctx context.Context, ffprobePath, root string, st *State) ([]candidate, error) {
+func listCandidates(ctx context.Context, ffprobePath, root string, st *State, debug bool) ([]candidate, error) {
 	var out []candidate
+	if debug {
+		fmt.Printf("[scan] Walking %s\n", root)
+	}
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -177,18 +230,110 @@ func listCandidates(ctx context.Context, ffprobePath, root string, st *State) ([
 
 		ctx2, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
+		if debug {
+			fmt.Printf("[scan] probing %s\n", p)
+		}
 		pi, err := probe(ctx2, ffprobePath, p)
 		if err != nil {
+			if debug {
+				fmt.Printf("[scan] ffprobe error for %s: %v\n", p, err)
+			}
 			_ = st.Set(p, "failed")
 			return nil
 		}
 		if strings.EqualFold(pi.VideoCodec, "h264") || strings.EqualFold(pi.VideoCodec, "avc") {
 			out = append(out, candidate{path: p, info: pi})
 			_ = st.Set(p, "queued")
+			if debug {
+				fmt.Printf("[scan] queued %s (codec=%s)\n", p, pi.VideoCodec)
+			}
+		} else if debug {
+			fmt.Printf("[scan] skipping %s (codec=%s)\n", p, pi.VideoCodec)
 		}
 		return nil
 	})
 	return out, err
+}
+
+func deriveQualityChoice(info *ProbeInfo) qualityChoice {
+	base := 22
+	var bpp float64
+	var bitrate int64
+	if info != nil {
+		bitrate = info.BitRate
+		base, bpp = estimateQualityLevel(info)
+	}
+	crf := clampRange(base, 16, 35)
+	icq := clampRange(base-1, 1, 51)
+	cq := clampRange(base-1, 0, 51)
+	return qualityChoice{
+		CRF:           crf,
+		ICQ:           icq,
+		CQ:            cq,
+		SourceBitrate: bitrate,
+		BitsPerPixel:  bpp,
+	}
+}
+
+func estimateQualityLevel(info *ProbeInfo) (int, float64) {
+	if info == nil {
+		return 22, 0
+	}
+	w, h := info.Width, info.Height
+	fps := info.FPS
+	bitrate := info.BitRate
+	var bpp float64
+	if w > 0 && h > 0 && fps > 0 && bitrate > 0 {
+		pixelsPerSecond := float64(w*h) * fps
+		if pixelsPerSecond > 0 {
+			bpp = float64(bitrate) / pixelsPerSecond
+		}
+	}
+	switch {
+	case bpp >= 0.18:
+		return 25, bpp
+	case bpp >= 0.14:
+		return 26, bpp
+	case bpp >= 0.11:
+		return 27, bpp
+	case bpp >= 0.09:
+		return 28, bpp
+	case bpp >= 0.075:
+		return 29, bpp
+	case bpp >= 0.06:
+		return 30, bpp
+	case bpp >= 0.045:
+		return 31, bpp
+	case bpp > 0:
+		return 32, bpp
+	}
+	if bitrate > 0 {
+		switch {
+		case bitrate >= 20_000_000:
+			return 26, 0
+		case bitrate >= 12_000_000:
+			return 27, 0
+		case bitrate >= 8_000_000:
+			return 28, 0
+		case bitrate >= 5_000_000:
+			return 29, 0
+		case bitrate >= 3_000_000:
+			return 30, 0
+		default:
+			return 32, 0
+		}
+	}
+	return 30, 0
+}
+
+func clampRange(val, min, max int) int {
+	if val < min {
+		return min
+	}
+	if val > max {
+		return max
+	}
+	return val
 }
 
 func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog) error {
@@ -213,12 +358,14 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 			// video
 			"-c:v", "hevc_qsv",
 			"-preset", "veryfast",
-			"-global_quality", "24",
-			// audio/subs passthrough
+		}
+		args = append(args,
+			"-global_quality", strconv.Itoa(jb.Quality.ICQ),
+		)
+		args = append(args,
 			"-c:a", "copy",
 			"-c:s", "copy",
-			jb.OutTarget,
-		}
+		)
 	case "nvenc", "hevc_nvenc":
 		args = []string{
 			"-hide_banner",
@@ -228,13 +375,16 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 			"-map", "0",
 			"-c:v", "hevc_nvenc",
 			"-preset", "medium",
+		}
+		args = append(args,
 			"-rc:v", "vbr",
-			"-cq", "23",
+			"-cq", strconv.Itoa(jb.Quality.CQ),
 			"-b:v", "0",
+		)
+		args = append(args,
 			"-c:a", "copy",
 			"-c:s", "copy",
-			jb.OutTarget,
-		}
+		)
 	default:
 		args = []string{
 			"-hide_banner",
@@ -243,13 +393,24 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 			"-i", jb.Src,
 			"-map", "0",
 			"-c:v", "libx265",
-			"-crf", "23",
 			"-preset", "medium",
+		}
+		args = append(args,
+			"-crf", strconv.Itoa(jb.Quality.CRF),
+		)
+		args = append(args,
 			"-c:a", "copy",
 			"-c:s", "copy",
-			jb.OutTarget,
-		}
+		)
 	}
+
+	if jb.Container == "mp4" {
+		if jb.Faststart {
+			args = append(args, "-movflags", "+faststart")
+		}
+		args = append(args, "-f", "mp4")
+	}
+	args = append(args, jb.OutTarget)
 
 	cmd := exec.CommandContext(ctx, cfg.FFmpegPath, args...)
 

@@ -15,6 +15,7 @@ type ffProbeOutput struct {
 	Format  struct {
 		Filename string `json:"filename"`
 		Duration string `json:"duration"`
+		BitRate  string `json:"bit_rate"`
 	} `json:"format"`
 }
 
@@ -25,6 +26,7 @@ type ffProbeStream struct {
 	Height       int    `json:"height"`
 	RFrameRate   string `json:"r_frame_rate"`
 	AvgFrameRate string `json:"avg_frame_rate"`
+	BitRate      string `json:"bit_rate"`
 }
 
 type ProbeInfo struct {
@@ -32,6 +34,7 @@ type ProbeInfo struct {
 	Width      int
 	Height     int
 	FPS        float64
+	BitRate    int64
 }
 
 // fpsFromFrac parses "24000/1001" → 23.976, "25/1" → 25, "0/0" → 0
@@ -81,10 +84,22 @@ func probe(ctx context.Context, ffprobePath, file string) (*ProbeInfo, error) {
 	if fps == 0 {
 		fps = fpsFromFrac(v.AvgFrameRate)
 	}
+	var bitrate int64
+	if v.BitRate != "" {
+		if br, err := strconv.ParseInt(v.BitRate, 10, 64); err == nil {
+			bitrate = br
+		}
+	}
+	if bitrate == 0 && out.Format.BitRate != "" {
+		if br, err := strconv.ParseInt(out.Format.BitRate, 10, 64); err == nil {
+			bitrate = br
+		}
+	}
 	return &ProbeInfo{
 		VideoCodec: v.CodecName,
 		Width:      v.Width,
 		Height:     v.Height,
 		FPS:        fps,
+		BitRate:    bitrate,
 	}, nil
 }
