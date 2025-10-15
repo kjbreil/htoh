@@ -1,0 +1,280 @@
+package config
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/BurntSushi/toml"
+	"opti.local/opti/internal/runner"
+)
+
+// TomlConfig represents the TOML configuration file structure.
+// All fields use snake_case TOML tags to match common configuration conventions.
+type TomlConfig struct {
+	SourceDir      string `toml:"source_dir"`
+	WorkDir        string `toml:"work_dir"`
+	Interactive    bool   `toml:"interactive"`
+	Keep           bool   `toml:"keep"`
+	Silent         bool   `toml:"silent"`
+	Workers        int    `toml:"workers"`
+	Engine         string `toml:"engine"`
+	VAAPIDevice    string `toml:"vaapi_device"`
+	FFmpegPath     string `toml:"ffmpeg_path"`
+	FFprobePath    string `toml:"ffprobe_path"`
+	Debug          bool   `toml:"debug"`
+	ForceMP4       bool   `toml:"force_mp4"`
+	FaststartMP4   bool   `toml:"faststart_mp4"`
+	FastMode       bool   `toml:"fast_mode"`
+	SwapInplace    bool   `toml:"swap_inplace"`
+	DeleteOriginal bool   `toml:"delete_original"`
+}
+
+// LoadFromFile reads and parses a TOML configuration file.
+// It returns a runner.Config populated with values from the file.
+// Returns an error if the file cannot be read or parsed.
+func LoadFromFile(path string) (*runner.Config, error) {
+	// Check if file exists
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("config file not found: %s", path)
+		}
+		return nil, fmt.Errorf("cannot access config file: %w", err)
+	}
+
+	// Parse TOML file
+	var tomlCfg TomlConfig
+	if _, err := toml.DecodeFile(path, &tomlCfg); err != nil {
+		return nil, fmt.Errorf("failed to parse TOML config: %w", err)
+	}
+
+	// Convert to runner.Config
+	cfg := &runner.Config{
+		SourceDir:      tomlCfg.SourceDir,
+		WorkDir:        tomlCfg.WorkDir,
+		Interactive:    tomlCfg.Interactive,
+		Keep:           tomlCfg.Keep,
+		Silent:         tomlCfg.Silent,
+		Workers:        tomlCfg.Workers,
+		Engine:         tomlCfg.Engine,
+		VAAPIDevice:    tomlCfg.VAAPIDevice,
+		FFmpegPath:     tomlCfg.FFmpegPath,
+		FFprobePath:    tomlCfg.FFprobePath,
+		Debug:          tomlCfg.Debug,
+		ForceMP4:       tomlCfg.ForceMP4,
+		FaststartMP4:   tomlCfg.FaststartMP4,
+		FastMode:       tomlCfg.FastMode,
+		SwapInplace:    tomlCfg.SwapInplace,
+		DeleteOriginal: tomlCfg.DeleteOriginal,
+	}
+
+	return cfg, nil
+}
+
+// GenerateDefault creates an example configuration file with all available options.
+// The file includes helpful comments explaining each setting and shows sensible defaults.
+// Returns an error if the file cannot be written.
+func GenerateDefault(path string) error {
+	content := `# Opti Configuration File
+#
+# This is an example configuration file for the Opti H.264 to HEVC transcoder.
+# All settings shown here are optional - CLI flags will override config file values.
+#
+# To use this config: opti --config /path/to/config.toml
+
+# ============================================================================
+# PATHS
+# ============================================================================
+
+# source_dir: Directory containing video files to transcode
+# Default: current directory
+# source_dir = "/path/to/videos"
+
+# work_dir: Directory where transcoded files will be saved
+# Default: current directory
+# work_dir = "/path/to/output"
+
+# ffmpeg_path: Path to ffmpeg binary
+# Default: "ffmpeg" (searches in PATH)
+# ffmpeg_path = "/usr/bin/ffmpeg"
+
+# ffprobe_path: Path to ffprobe binary
+# Default: auto-detected from ffmpeg location or "ffprobe"
+# ffprobe_path = "/usr/bin/ffprobe"
+
+# ============================================================================
+# ENCODING ENGINE
+# ============================================================================
+
+# engine: Video encoding engine to use
+# Options:
+#   - "cpu"    : Software encoding with libx265 (slowest, best compatibility)
+#   - "qsv"    : Intel Quick Sync Video hardware acceleration
+#   - "nvenc"  : NVIDIA NVENC hardware acceleration
+#   - "vaapi"  : Video Acceleration API (Intel/AMD GPUs on Linux)
+# Default: "cpu"
+# engine = "cpu"
+
+# vaapi_device: Hardware device path for VAAPI encoding
+# Only used when engine = "vaapi"
+# Default: "/dev/dri/renderD128"
+# Examples:
+#   - "/dev/dri/renderD128" (first GPU)
+#   - "/dev/dri/renderD129" (second GPU)
+# vaapi_device = "/dev/dri/renderD128"
+
+# ============================================================================
+# PROCESSING OPTIONS
+# ============================================================================
+
+# workers: Number of parallel transcoding workers
+# Default: number of CPU cores
+# workers = 4
+
+# interactive: Prompt for confirmation before starting
+# Default: false
+# interactive = false
+
+# silent: Suppress progress output
+# Default: false
+# silent = false
+
+# debug: Enable verbose debug output
+# Default: false
+# debug = false
+
+# fast_mode: Use faster encoding settings (slightly lower quality)
+# Increases CRF/ICQ/CQ values by 1 for faster encoding
+# Default: false
+# fast_mode = false
+
+# ============================================================================
+# OUTPUT OPTIONS
+# ============================================================================
+
+# force_mp4: Force MP4 container for all output files
+# Default: false (uses MKV except for existing MP4 files)
+# force_mp4 = false
+
+# faststart_mp4: Enable faststart flag for MP4 files
+# Moves moov atom to start of file for faster streaming
+# Default: true
+# faststart_mp4 = true
+
+# swap_inplace: Replace original files with transcoded versions
+# Creates .original backup of source files
+# WARNING: Use with caution - modifies your original files!
+# Default: false
+# swap_inplace = false
+
+# delete_original: Delete .original backup files after successful swap
+# Only applies when swap_inplace = true
+# WARNING: This permanently removes your original files!
+# Default: false
+# delete_original = false
+
+# ============================================================================
+# ADVANCED OPTIONS
+# ============================================================================
+
+# keep: Keep intermediate files on error (for debugging)
+# Default: false
+# keep = false
+
+# ============================================================================
+# EXAMPLE CONFIGURATIONS
+# ============================================================================
+
+# Example 1: Fast CPU encoding with MP4 output
+# engine = "cpu"
+# fast_mode = true
+# force_mp4 = true
+# workers = 8
+
+# Example 2: NVIDIA GPU acceleration
+# engine = "nvenc"
+# workers = 2
+# force_mp4 = true
+
+# Example 3: Intel hardware acceleration with in-place replacement
+# engine = "qsv"
+# swap_inplace = true
+# workers = 4
+
+# Example 4: AMD GPU with VAAPI (Linux)
+# engine = "vaapi"
+# vaapi_device = "/dev/dri/renderD128"
+# workers = 4
+`
+
+	// Write the file
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	return nil
+}
+
+// MergeConfigs merges a config file with CLI flags.
+// CLI flags take precedence over config file values.
+// Only explicitly set CLI flag values (non-default) override config file values.
+func MergeConfigs(configFile, cliFlags *runner.Config) *runner.Config {
+	// Start with config file values
+	merged := *configFile
+
+	// Override with CLI flags if they were explicitly set
+	// For strings, we check if they're non-empty AND different from defaults
+	if cliFlags.SourceDir != "" {
+		merged.SourceDir = cliFlags.SourceDir
+	}
+	if cliFlags.WorkDir != "" {
+		merged.WorkDir = cliFlags.WorkDir
+	}
+	// For booleans, we only override if true (since false is the default)
+	if cliFlags.Interactive {
+		merged.Interactive = true
+	}
+	if cliFlags.Keep {
+		merged.Keep = true
+	}
+	if cliFlags.Silent {
+		merged.Silent = true
+	}
+	// For Workers, override if different from default (1)
+	if cliFlags.Workers != 1 {
+		merged.Workers = cliFlags.Workers
+	}
+	// For Engine, override if different from default ("cpu")
+	if cliFlags.Engine != "" && cliFlags.Engine != "cpu" {
+		merged.Engine = cliFlags.Engine
+	}
+	if cliFlags.VAAPIDevice != "" {
+		merged.VAAPIDevice = cliFlags.VAAPIDevice
+	}
+	// For FFmpegPath, override if different from default ("ffmpeg")
+	if cliFlags.FFmpegPath != "" && cliFlags.FFmpegPath != "ffmpeg" {
+		merged.FFmpegPath = cliFlags.FFmpegPath
+	}
+	if cliFlags.FFprobePath != "" {
+		merged.FFprobePath = cliFlags.FFprobePath
+	}
+	if cliFlags.Debug {
+		merged.Debug = true
+	}
+	if cliFlags.ForceMP4 {
+		merged.ForceMP4 = true
+	}
+	if cliFlags.FaststartMP4 {
+		merged.FaststartMP4 = true
+	}
+	if cliFlags.FastMode {
+		merged.FastMode = true
+	}
+	if cliFlags.SwapInplace {
+		merged.SwapInplace = true
+	}
+	if cliFlags.DeleteOriginal {
+		merged.DeleteOriginal = true
+	}
+
+	return &merged
+}

@@ -140,10 +140,54 @@ The sections below outline how to prepare common operating systems for building 
 opti -s <source-dir> -w <work-dir> [options]
 ```
 
+## Configuration File
+
+`opti` supports TOML configuration files as an alternative to specifying options via CLI flags. This is especially useful when you have a consistent set of preferences you want to reuse across multiple runs.
+
+### Precedence
+When you provide a configuration file with `-c`, the values from the config file take precedence over CLI flags. This means you can define your standard settings in the config file and still override specific options via flags when needed.
+
+### Generating a default config
+To create a default configuration file with all available options:
+
+```bash
+opti --generate-config opti.toml
+```
+
+This generates a TOML file with sensible defaults and comments explaining each field.
+
+### Example configuration
+
+```toml
+# opti configuration file
+# All fields are optional - omit any field to use CLI flag or default
+
+source_dir = "/mnt/media/source"
+work_dir = "/mnt/media/opti-work"
+workers = 4
+engine = "cpu"  # Options: cpu, qsv, nvenc, vaapi
+# vaapi_device = "/dev/dri/renderD128"  # Uncomment for VAAPI
+ffmpeg_path = "ffmpeg"
+# ffprobe_path = ""  # Auto-detected if empty
+interactive = false
+silent = false
+debug = false
+keep = false
+force_mp4 = false
+faststart_mp4 = false
+fast_mode = false
+swap_inplace = false
+delete_original = false
+```
+
+Not all fields need to be specified in the config file. Any omitted field will fall back to its CLI flag value or the default.
+
 ### Flag reference
 
 | Flag | Description | Default |
 | --- | --- | --- |
+| `-c` | Path to TOML configuration file. Config values override CLI flags. | `""` (empty, no default config) |
+| `--generate-config` | Generate a default TOML config file at the specified path and exit. | N/A |
 | `-s` | Source directory that will be scanned for candidate videos. | *(required)* |
 | `-w` | Working/output directory used for encoded files and `.hevc_state.tsv`. | *(required)* |
 | `-j` | Number of parallel workers. `opti` also caps to at least 1. | `1` |
@@ -202,6 +246,18 @@ opti -ffmpeg /usr/local/bin/ffmpeg -list-hw
 _On Windows PowerShell, use the binary in `.\bin`:_
 ```powershell
 .\bin\opti.exe -s D:\Media\Source -w D:\Media\Work
+```
+
+### Use a configuration file
+```bash
+opti --generate-config opti.toml
+# Edit opti.toml to set your preferences
+opti -c opti.toml
+```
+
+You can still override specific settings with CLI flags, but the config file takes precedence:
+```bash
+opti -c opti.toml -s /different/source  # Config file wins, uses source from TOML
 ```
 
 ## Development

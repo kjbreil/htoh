@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"opti.local/opti/internal/config"
 	"opti.local/opti/internal/runner"
 )
 
@@ -24,9 +25,12 @@ var (
 	debugLogging = flag.Bool("debug", false, "Enable verbose logging (file discovery, ffprobe calls)")
 	forceMP4     = flag.Bool("output-mp4", false, "Force outputs to MP4 container with -movflags +faststart")
 	faststartMP4 = flag.Bool("faststart-mp4", false, "Keep MP4 container when source is MP4 and add -movflags +faststart")
-	fastMode     = flag.Bool("fast", false, "Favor smaller files by lowering quality targets one notch across all engines")
-	listHW       = flag.Bool("list-hw", false, "Detect and print available hardware accelerators/encoders, then exit")
-	version      = flag.Bool("version", false, "Print version and exit")
+	fastMode       = flag.Bool("fast", false, "Favor smaller files by lowering quality targets one notch across all engines")
+	listHW         = flag.Bool("list-hw", false, "Detect and print available hardware accelerators/encoders, then exit")
+	version        = flag.Bool("version", false, "Print version and exit")
+	configPath     = flag.String("c", "", "Path to TOML config file (config values override CLI flags)")
+	configPathLong = flag.String("config", "", "Path to TOML config file (same as -c)")
+	generateConfig = flag.String("generate-config", "", "Generate a default config file at the specified path and exit")
 )
 
 const Version = "0.3.3"
@@ -39,6 +43,17 @@ func main() {
 		fmt.Println("opti", Version)
 		return
 	}
+
+	// Handle --generate-config flag
+	if *generateConfig != "" {
+		if err := config.GenerateDefault(*generateConfig); err != nil {
+			fmt.Fprintf(os.Stderr, "opti: failed to generate config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Generated default config file at: %s\n", *generateConfig)
+		return
+	}
+
 	if *listHW {
 		if err := runner.PrintHardwareCaps(*ffmpegPath); err != nil {
 			fmt.Fprintln(os.Stderr, "opti:", err)
@@ -46,29 +61,26 @@ func main() {
 		}
 		return
 	}
-	if *deleteOriginal && !*swapInplace {
-		fmt.Fprintln(os.Stderr, "opti: --delete-original requires --swap-inplace")
-		os.Exit(2)
-	}
-	if err := runner.ValidateEngine(*engine, *ffmpegPath); err != nil {
-		fmt.Fprintln(os.Stderr, "opti:", err)
-		os.Exit(1)
-	}
-	if *sourceDir == "" || *workDir == "" {
-		fmt.Fprintln(os.Stderr, "usage: -s <source> -w <workdir> [options]")
-		os.Exit(2)
-	}
-	if *workers <= 0 {
-		*workers = 1
+
+	// Load config from file if specified
+	// Support both -c and --config flags (--config takes precedence if both are set)
+	configFilePath := *configPath
+	if *configPathLong != "" {
+		configFilePath = *configPathLong
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	// In case someone wants a hard cap:
-	_ = ctx
-	_ = time.Hour
+	var loadedConfig *runner.Config
+	if configFilePath != "" {
+		var err error
+		loadedConfig, err = config.LoadFromFile(configFilePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "opti: failed to load config file: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
-	cfg := runner.Config{
+	// Build CLI flags config
+	cliConfig := runner.Config{
 		SourceDir:      *sourceDir,
 		WorkDir:        *workDir,
 		Interactive:    *interactive,
@@ -86,6 +98,37 @@ func main() {
 		SwapInplace:    *swapInplace,
 		DeleteOriginal: *deleteOriginal,
 	}
+
+	// Merge configs if a config file was loaded
+	// CLI flags take precedence over config file values
+	cfg := cliConfig
+	if loadedConfig != nil {
+		cfg = *config.MergeConfigs(loadedConfig, &cliConfig)
+	}
+
+	// Validate merged configuration
+	if cfg.DeleteOriginal && !cfg.SwapInplace {
+		fmt.Fprintln(os.Stderr, "opti: --delete-original requires --swap-inplace")
+		os.Exit(2)
+	}
+	if err := runner.ValidateEngine(cfg.Engine, cfg.FFmpegPath); err != nil {
+		fmt.Fprintln(os.Stderr, "opti:", err)
+		os.Exit(1)
+	}
+	if cfg.SourceDir == "" || cfg.WorkDir == "" {
+		fmt.Fprintln(os.Stderr, "usage: -s <source> -w <workdir> [options]")
+		os.Exit(2)
+	}
+	if cfg.Workers <= 0 {
+		cfg.Workers = 1
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// In case someone wants a hard cap:
+	_ = ctx
+	_ = time.Hour
+
 	if err := runner.Run(context.Background(), cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "opti:", err)
 		os.Exit(1)
