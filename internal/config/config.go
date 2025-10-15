@@ -17,6 +17,7 @@ type TomlConfig struct {
 	Keep         bool   `toml:"keep"`
 	Silent       bool   `toml:"silent"`
 	Workers      int    `toml:"workers"`
+	ScanInterval int    `toml:"scan_interval"`
 	Engine       string `toml:"engine"`
 	VAAPIDevice  string `toml:"vaapi_device"`
 	FFmpegPath   string `toml:"ffmpeg_path"`
@@ -53,6 +54,7 @@ func LoadFromFile(path string) (*runner.Config, error) {
 		Keep:         tomlCfg.Keep,
 		Silent:       tomlCfg.Silent,
 		Workers:      tomlCfg.Workers,
+		ScanInterval: tomlCfg.ScanInterval,
 		Engine:       tomlCfg.Engine,
 		VAAPIDevice:  tomlCfg.VAAPIDevice,
 		FFmpegPath:   tomlCfg.FFmpegPath,
@@ -125,6 +127,11 @@ func GenerateDefault(path string) error {
 # workers: Number of parallel transcoding workers
 # Default: number of CPU cores
 # workers = 4
+
+# scan_interval: Time in minutes between directory scans
+# Set to 0 to scan once and exit (no continuous monitoring)
+# Default: 5
+# scan_interval = 5
 
 # interactive: Prompt for confirmation before starting
 # Default: false
@@ -225,6 +232,10 @@ func MergeConfigs(configFile, cliFlags *runner.Config) *runner.Config {
 	// For Workers, override if different from default (1)
 	if cliFlags.Workers != 1 {
 		merged.Workers = cliFlags.Workers
+	}
+	// For ScanInterval, override if different from default (5)
+	if cliFlags.ScanInterval != 5 {
+		merged.ScanInterval = cliFlags.ScanInterval
 	}
 	// For Engine, override if different from default ("cpu")
 	if cliFlags.Engine != "" && cliFlags.Engine != "cpu" {

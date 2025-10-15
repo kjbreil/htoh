@@ -3,7 +3,6 @@ package runner
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -13,8 +12,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 type Config struct {
@@ -24,6 +24,7 @@ type Config struct {
 	Keep         bool
 	Silent       bool
 	Workers      int
+	ScanInterval int    // minutes between scans, 0 = scan once and exit
 	Engine       string // cpu|qsv|nvenc|vaapi
 	VAAPIDevice  string // Hardware device path for VAAPI (e.g., /dev/dri/renderD128)
 	FFmpegPath   string
@@ -56,10 +57,6 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.Workers <= 0 {
 		cfg.Workers = runtime.NumCPU()
 	}
-	state := NewState(cfg.WorkDir)
-	if err := state.Load(); err != nil {
-		return fmt.Errorf("load state: %w", err)
-	}
 
 	// Set default ffmpeg path if not provided
 	ffmpegPath := strings.TrimSpace(cfg.FFmpegPath)
@@ -79,132 +76,55 @@ func Run(ctx context.Context, cfg Config) error {
 		fmt.Printf("Using ffprobe: %s\n", ffprobePath)
 	}
 
-	if !cfg.Silent {
-		fmt.Println("Indexing files (scanning and probing H.264)…")
-	}
-	files, err := listCandidates(ctx, ffprobePath, cfg.SourceDir, state, cfg.Debug)
+	// Initialize database
+	db, err := InitDB(cfg.WorkDir, cfg.Debug)
 	if err != nil {
-		return err
+		return fmt.Errorf("init database: %w", err)
 	}
 	if !cfg.Silent {
-		fmt.Printf("Found %d candidate file(s).\n", len(files))
+		fmt.Println("Database initialized.")
 	}
 
-	if cfg.Interactive {
-		if len(files) == 0 {
-			fmt.Println("Nothing to do.")
-			return nil
+	// Continuous scanning loop
+	for {
+		// Scan directory
+		if !cfg.Silent {
+			fmt.Println("Scanning directory...")
 		}
-		fmt.Print("Proceed with all? [y/N]: ")
-		var ans string
-		_, _ = fmt.Scanln(&ans)
-		ans = strings.ToLower(strings.TrimSpace(ans))
-		if ans != "y" && ans != "yes" {
-			return errors.New("aborted")
-		}
-	}
 
-	// progress dashboard
-	prog := NewProg()
-	stopUI := make(chan struct{})
-	if !cfg.Silent {
-		go prog.RenderLoop(stopUI)
-	}
-
-	// Queue & workers
-	jobs := make(chan job, cfg.Workers*2)
-	var wg sync.WaitGroup
-	errCh := make(chan error, cfg.Workers)
-
-	for i := 0; i < cfg.Workers; i++ {
-		wid := i + 1
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-			for jb := range jobs {
-				prog.Update(workerID, func(r *Row) {
-					r.WorkerID = workerID
-					r.FileBase = filepath.Base(jb.Src)
-					r.Phase = "transcoding"
-					r.FPS = 0
-					r.Speed = "-"
-					r.OutTimeS = 0
-					r.SizeBytes = 0
-				})
-				if err := state.Set(jb.Src, "processing"); err != nil && !cfg.Silent {
-					fmt.Println("state write:", err)
-				}
-				if err := transcode(ctx, cfg, jb, workerID, prog); err != nil {
-					_ = state.Set(jb.Src, "failed")
-					prog.Fail(workerID, err.Error())
-					errCh <- fmt.Errorf("%s: %w", jb.Src, err)
-					continue
-				}
-				_ = state.Set(jb.Src, "done")
-				prog.Done(workerID)
-			}
-		}(wid)
-	}
-
-	for _, pi := range files {
-		rel, err := filepath.Rel(cfg.SourceDir, pi.path)
+		files, err := listCandidates(ctx, ffprobePath, cfg.SourceDir, db, cfg.Debug)
 		if err != nil {
-			rel = filepath.Base(pi.path)
+			return err
 		}
-		base := filepath.Join(cfg.WorkDir, filepath.Base(pi.path))
-		container := "mkv"
-		if cfg.ForceMP4 || (cfg.FaststartMP4 && strings.EqualFold(filepath.Ext(pi.path), ".mp4")) {
-			container = "mp4"
-		}
-		faststart := container == "mp4"
-		qChoice := deriveQualityChoice(pi.info, cfg.FastMode)
-		ext := ".hevc.mkv"
-		if container == "mp4" {
-			ext = ".hevc.mp4"
-		}
-		out := base + ext
-		if cfg.Debug {
-			fmt.Printf("[queue] %s -> %s (container=%s, src=%.2f Mbps, bpp=%.4f, crf=%d, icq=%d, cq=%d)\n",
-				pi.path, out, container,
-				float64(qChoice.SourceBitrate)/1_000_000.0,
-				qChoice.BitsPerPixel,
-				qChoice.CRF,
-				qChoice.ICQ,
-				qChoice.CQ,
-			)
-		}
-		jobs <- job{
-			Src:       pi.path,
-			Rel:       rel,
-			Probe:     pi.info,
-			OutTarget: out,
-			Container: container,
-			Faststart: faststart,
-			Quality:   qChoice,
-		}
-	}
-	close(jobs)
 
-	waitDone := make(chan struct{})
-	go func() { wg.Wait(); close(waitDone) }()
+		if !cfg.Silent {
+			fmt.Printf("Found %d video file(s). Database updated.\n", len(files))
+		}
 
-	select {
-	case <-waitDone:
-	case <-ctx.Done():
-	}
-	close(stopUI)
+		// Check if we should scan continuously or exit
+		if cfg.ScanInterval == 0 {
+			if !cfg.Silent {
+				fmt.Println("Single scan complete. Exiting.")
+			}
+			break
+		}
 
-	close(errCh)
-	var nErr int
-	for range errCh {
-		nErr++
+		// Wait for next scan
+		if !cfg.Silent {
+			fmt.Printf("Waiting %d minute(s) before next scan...\n", cfg.ScanInterval)
+		}
+
+		select {
+		case <-ctx.Done():
+			if !cfg.Silent {
+				fmt.Println("\nShutdown requested. Exiting.")
+			}
+			return ctx.Err()
+		case <-time.After(time.Duration(cfg.ScanInterval) * time.Minute):
+			// Continue to next scan
+		}
 	}
-	if nErr > 0 {
-		return fmt.Errorf("completed with %d errors", nErr)
-	}
-	if !cfg.Silent {
-		fmt.Println("All done.")
-	}
+
 	return nil
 }
 
@@ -213,11 +133,12 @@ type candidate struct {
 	info *ProbeInfo
 }
 
-func listCandidates(ctx context.Context, ffprobePath, root string, st *State, debug bool) ([]candidate, error) {
+func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, debug bool) ([]candidate, error) {
 	var out []candidate
 	if debug {
 		fmt.Printf("[scan] Walking %s\n", root)
 	}
+
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -225,41 +146,164 @@ func listCandidates(ctx context.Context, ffprobePath, root string, st *State, de
 		if d.IsDir() {
 			return nil
 		}
+
+		// Check file extension
 		ext := strings.ToLower(filepath.Ext(d.Name()))
 		switch ext {
 		case ".mkv", ".mp4", ".mov", ".m4v":
 		default:
 			return nil
 		}
-		switch st.Get(p) {
-		case "done", "processing":
+
+		// Get file info
+		fileInfo, err := os.Stat(p)
+		if err != nil {
+			if debug {
+				fmt.Printf("[scan] stat error for %s: %v\n", p, err)
+			}
 			return nil
 		}
 
-		ctx2, cancel := context.WithTimeout(ctx, 60*time.Second)
-		defer cancel()
-		if debug {
-			fmt.Printf("[scan] probing %s\n", p)
-		}
-		pi, err := probe(ctx2, ffprobePath, p)
-		if err != nil {
+		// Check database for existing file
+		existingFile, err := GetFileByPath(db, p)
+		needsProbe := false
+
+		if err == gorm.ErrRecordNotFound {
+			// New file
+			needsProbe = true
 			if debug {
-				fmt.Printf("[scan] ffprobe error for %s: %v\n", p, err)
+				fmt.Printf("[scan] new file: %s\n", p)
 			}
-			_ = st.Set(p, "failed")
+		} else if err != nil {
+			if debug {
+				fmt.Printf("[scan] db error for %s: %v\n", p, err)
+			}
 			return nil
-		}
-		if strings.EqualFold(pi.VideoCodec, "h264") || strings.EqualFold(pi.VideoCodec, "avc") {
-			out = append(out, candidate{path: p, info: pi})
-			_ = st.Set(p, "queued")
-			if debug {
-				fmt.Printf("[scan] queued %s (codec=%s)\n", p, pi.VideoCodec)
+		} else {
+			// File exists in DB, check if changed
+			if existingFile.Size != fileInfo.Size() || !existingFile.ModTime.Equal(fileInfo.ModTime()) {
+				needsProbe = true
+				if debug {
+					fmt.Printf("[scan] file changed: %s\n", p)
+				}
+			} else {
+				if debug {
+					fmt.Printf("[scan] file unchanged (cached): %s\n", p)
+				}
 			}
-		} else if debug {
-			fmt.Printf("[scan] skipping %s (codec=%s)\n", p, pi.VideoCodec)
 		}
+
+		var probeInfo *ProbeInfoDetailed
+		if needsProbe {
+			// Probe the file
+			ctx2, cancel := context.WithTimeout(ctx, 60*time.Second)
+			defer cancel()
+
+			if debug {
+				fmt.Printf("[scan] probing %s\n", p)
+			}
+
+			pi, err := probe(ctx2, ffprobePath, p)
+			if err != nil {
+				if debug {
+					fmt.Printf("[scan] ffprobe error for %s: %v\n", p, err)
+				}
+				// Store file with failed status
+				file := &File{
+					Path:    p,
+					Name:    filepath.Base(p),
+					Size:    fileInfo.Size(),
+					ModTime: fileInfo.ModTime(),
+					Status:  "failed",
+				}
+				_ = CreateOrUpdateFile(db, file)
+				return nil
+			}
+
+			probeInfo = pi
+
+			// Update database with file info
+			file := &File{
+				Path:    p,
+				Name:    filepath.Base(p),
+				Size:    fileInfo.Size(),
+				ModTime: fileInfo.ModTime(),
+				Status:  "queued",
+			}
+			if err := CreateOrUpdateFile(db, file); err != nil {
+				if debug {
+					fmt.Printf("[scan] db file update error for %s: %v\n", p, err)
+				}
+				return nil
+			}
+
+			// Get the file ID (it was set by CreateOrUpdateFile)
+			existingFile, _ = GetFileByPath(db, p)
+
+			// Update database with media info
+			mediaInfo := &MediaInfo{
+				FileID:         existingFile.ID,
+				Duration:       probeInfo.Duration,
+				FormatBitrate:  probeInfo.FormatBitrate,
+				Container:      probeInfo.Container,
+				VideoCodec:     probeInfo.VideoCodec,
+				VideoProfile:   probeInfo.VideoProfile,
+				Width:          probeInfo.Width,
+				Height:         probeInfo.Height,
+				CodedWidth:     probeInfo.CodedWidth,
+				CodedHeight:    probeInfo.CodedHeight,
+				FPS:            probeInfo.FPS,
+				AspectRatio:    probeInfo.AspectRatio,
+				VideoBitrate:   probeInfo.VideoBitrate,
+				PixelFormat:    probeInfo.PixelFormat,
+				BitDepth:       probeInfo.BitDepth,
+				ChromaLocation: probeInfo.ChromaLocation,
+				ColorSpace:     probeInfo.ColorSpace,
+				ColorRange:     probeInfo.ColorRange,
+				ColorPrimaries: probeInfo.ColorPrimaries,
+			}
+			if err := CreateOrUpdateMediaInfo(db, mediaInfo); err != nil {
+				if debug {
+					fmt.Printf("[scan] db media info update error for %s: %v\n", p, err)
+				}
+			}
+		}
+
+		// Add to candidate list (for future transcoding feature)
+		// For now, we still track H.264 files as candidates
+		if needsProbe && probeInfo != nil {
+			if strings.EqualFold(probeInfo.VideoCodec, "h264") || strings.EqualFold(probeInfo.VideoCodec, "avc") {
+				// Convert ProbeInfoDetailed to old ProbeInfo for candidate struct
+				oldProbeInfo := &ProbeInfo{
+					VideoCodec: probeInfo.VideoCodec,
+					Width:      probeInfo.Width,
+					Height:     probeInfo.Height,
+					FPS:        probeInfo.FPS,
+					BitRate:    probeInfo.VideoBitrate,
+				}
+				out = append(out, candidate{path: p, info: oldProbeInfo})
+				if debug {
+					fmt.Printf("[scan] queued candidate %s (codec=%s)\n", p, probeInfo.VideoCodec)
+				}
+			}
+		} else if !needsProbe && existingFile != nil {
+			// Use cached data
+			mediaInfo, err := GetMediaInfoByFileID(db, existingFile.ID)
+			if err == nil && (strings.EqualFold(mediaInfo.VideoCodec, "h264") || strings.EqualFold(mediaInfo.VideoCodec, "avc")) {
+				oldProbeInfo := &ProbeInfo{
+					VideoCodec: mediaInfo.VideoCodec,
+					Width:      mediaInfo.Width,
+					Height:     mediaInfo.Height,
+					FPS:        mediaInfo.FPS,
+					BitRate:    mediaInfo.VideoBitrate,
+				}
+				out = append(out, candidate{path: p, info: oldProbeInfo})
+			}
+		}
+
 		return nil
 	})
+
 	return out, err
 }
 
