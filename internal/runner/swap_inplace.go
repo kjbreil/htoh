@@ -10,13 +10,18 @@ import (
 // SwapInPlaceCopy moves the freshly transcoded file back to the source location,
 // renaming the original file to *.original as a backup. If the rename fails due to
 // cross-filesystem boundaries, fall back to copy semantics and leave the temp file removed.
-func SwapInPlaceCopy(srcPath, newPath string) error {
+// If deleteOriginal is true, the .original backup file is deleted after a successful swap.
+func SwapInPlaceCopy(srcPath, newPath string, deleteOriginal bool) error {
 	origBackup := srcPath + ".original"
 	if err := os.Rename(srcPath, origBackup); err != nil {
 		return fmt.Errorf("rename original -> .original failed: %w", err)
 	}
 
 	if err := os.Rename(newPath, srcPath); err == nil {
+		// Successful rename, delete backup if requested
+		if deleteOriginal {
+			_ = os.Remove(origBackup)
+		}
 		return nil
 	}
 
@@ -26,6 +31,11 @@ func SwapInPlaceCopy(srcPath, newPath string) error {
 		return fmt.Errorf("copy new -> original path failed: %w", err)
 	}
 	_ = os.Remove(newPath)
+
+	// Successful copy, delete backup if requested
+	if deleteOriginal {
+		_ = os.Remove(origBackup)
+	}
 	return nil
 }
 

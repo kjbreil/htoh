@@ -159,6 +159,7 @@ opti -s <source-dir> -w <work-dir> [options]
 | `-faststart-mp4` | Keep MP4 sources in MP4 (instead of MKV) and add `-movflags +faststart`; other inputs still land in MKV. | `false` |
 | `-fast` | Shift the quality heuristics one notch toward smaller files across all engines. | `false` |
 | `--swap-inplace` | After a successful encode, rename the source to `<name>.original` and move the output back to the original location. | `false` |
+| `--delete-original` | Delete the `.original` backup file after a successful swap (requires `--swap-inplace`). | `false` |
 | `-version` | Print version information and exit. | `false` |
 
 ### What happens during a run
@@ -166,7 +167,7 @@ opti -s <source-dir> -w <work-dir> [options]
 2. Discovered files are recorded in `work/.hevc_state.tsv` with their status (`queued`, `processing`, `done`, `failed`). This allows `opti` to resume automatically if you restart it later.  
 3. Each worker calls `ffmpeg` with `-progress pipe:1` and feeds progress updates into the dashboard.  
 4. Finished encodes are written under the work directory, preserving the relative path and appending `.hevc.mkv` by default. Use `-output-mp4` to force `.hevc.mp4` and `-faststart-mp4` to keep MP4 inputs in MP4 while leaving other codecs in MKV. Before launching `ffmpeg`, opti inspects the probed stream to estimate bits-per-pixel and chooses engine-specific quality targets so HEVC outputs stay close to the original quality without runaway file sizes; add `-fast` if you want the heuristics to lean another step toward smaller encodes.  
-5. With `--swap-inplace`, the tool renames the source file to `<name>.original` and moves the encoded file back to `<name>` (falling back to a copy if the directories are on different filesystems).  
+5. With `--swap-inplace`, the tool renames the source file to `<name>.original` and moves the encoded file back to `<name>` (falling back to a copy if the directories are on different filesystems). If `--delete-original` is also specified, the `.original` backup is deleted after a successful swap.  
 
 Interrupting the program (Ctrl+C) allows in-flight workers to finish their current tick. Re-running the command will skip everything marked `done` in the state file.
 

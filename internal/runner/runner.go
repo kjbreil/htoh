@@ -18,21 +18,22 @@ import (
 )
 
 type Config struct {
-	SourceDir    string
-	WorkDir      string
-	Interactive  bool
-	Keep         bool
-	Silent       bool
-	Workers      int
-	Engine       string // cpu|qsv|nvenc|vaapi
-	VAAPIDevice  string // Hardware device path for VAAPI (e.g., /dev/dri/renderD128)
-	FFmpegPath   string
-	FFprobePath  string
-	Debug        bool
-	ForceMP4     bool
-	FaststartMP4 bool
-	FastMode     bool
-	SwapInplace  bool
+	SourceDir      string
+	WorkDir        string
+	Interactive    bool
+	Keep           bool
+	Silent         bool
+	Workers        int
+	Engine         string // cpu|qsv|nvenc|vaapi
+	VAAPIDevice    string // Hardware device path for VAAPI (e.g., /dev/dri/renderD128)
+	FFmpegPath     string
+	FFprobePath    string
+	Debug          bool
+	ForceMP4       bool
+	FaststartMP4   bool
+	FastMode       bool
+	SwapInplace    bool
+	DeleteOriginal bool // Delete .original backup after successful swap (requires SwapInplace)
 }
 
 type qualityChoice struct {
@@ -537,7 +538,7 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 		return waitErr
 	}
 	if cfg.SwapInplace {
-		if err := SwapInPlaceCopy(jb.Src, jb.OutTarget); err != nil {
+		if err := SwapInPlaceCopy(jb.Src, jb.OutTarget, cfg.DeleteOriginal); err != nil {
 			return err
 		}
 	}

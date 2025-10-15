@@ -33,6 +33,7 @@ const Version = "0.3.3"
 
 func main() {
 	swapInplace := flag.Bool("swap-inplace", false, "After a successful transcode, rename the source to <name.ext>.original and copy the new file back to the original path (same name/ext).")
+	deleteOriginal := flag.Bool("delete-original", false, "Delete the .original backup file after a successful swap (requires --swap-inplace).")
 	flag.Parse()
 	if *version {
 		fmt.Println("opti", Version)
@@ -44,6 +45,10 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+	if *deleteOriginal && !*swapInplace {
+		fmt.Fprintln(os.Stderr, "opti: --delete-original requires --swap-inplace")
+		os.Exit(2)
 	}
 	if err := runner.ValidateEngine(*engine, *ffmpegPath); err != nil {
 		fmt.Fprintln(os.Stderr, "opti:", err)
@@ -64,21 +69,22 @@ func main() {
 	_ = time.Hour
 
 	cfg := runner.Config{
-		SourceDir:    *sourceDir,
-		WorkDir:      *workDir,
-		Interactive:  *interactive,
-		Keep:         *keep,
-		Silent:       *silent,
-		Workers:      *workers,
-		Engine:       *engine,
-		VAAPIDevice:  *device,
-		FFmpegPath:   *ffmpegPath,
-		FFprobePath:  *ffprobePath,
-		Debug:        *debugLogging,
-		ForceMP4:     *forceMP4,
-		FaststartMP4: *faststartMP4,
-		FastMode:     *fastMode,
-		SwapInplace:  *swapInplace,
+		SourceDir:      *sourceDir,
+		WorkDir:        *workDir,
+		Interactive:    *interactive,
+		Keep:           *keep,
+		Silent:         *silent,
+		Workers:        *workers,
+		Engine:         *engine,
+		VAAPIDevice:    *device,
+		FFmpegPath:     *ffmpegPath,
+		FFprobePath:    *ffprobePath,
+		Debug:          *debugLogging,
+		ForceMP4:       *forceMP4,
+		FaststartMP4:   *faststartMP4,
+		FastMode:       *fastMode,
+		SwapInplace:    *swapInplace,
+		DeleteOriginal: *deleteOriginal,
 	}
 	if err := runner.Run(context.Background(), cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "opti:", err)
