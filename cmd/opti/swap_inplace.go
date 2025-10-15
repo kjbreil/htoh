@@ -24,25 +24,34 @@ func ensureUniqueBackup(src string) (string, error) {
 // copyFile copies src -> dst with fsync. Overwrites dst.
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer in.Close()
 
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	buf := make([]byte, 8<<20) // 8 MiB
 	_, copyErr := io.CopyBuffer(out, in, buf)
 	syncErr := out.Sync()
 	closeErr := out.Close()
 
-	if copyErr != nil { return copyErr }
-	if syncErr != nil { return syncErr }
+	if copyErr != nil {
+		return copyErr
+	}
+	if syncErr != nil {
+		return syncErr
+	}
 	return closeErr
 }
 
 // SwapInPlaceCopy:
-//  1) rename src -> src.original*
-//  2) copy newFile -> src (original path/name)
+//  1. rename src -> src.original*
+//  2. copy newFile -> src (original path/name)
+//
 // Rollback: if copy fails, rename backup back to src.
 func SwapInPlaceCopy(src, newFile string) error {
 	dir := filepath.Dir(src)
