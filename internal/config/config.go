@@ -11,21 +11,22 @@ import (
 // TomlConfig represents the TOML configuration file structure.
 // All fields use snake_case TOML tags to match common configuration conventions.
 type TomlConfig struct {
-	SourceDir    string `toml:"source_dir"`
-	WorkDir      string `toml:"work_dir"`
-	Interactive  bool   `toml:"interactive"`
-	Keep         bool   `toml:"keep"`
-	Silent       bool   `toml:"silent"`
-	Workers      int    `toml:"workers"`
-	ScanInterval int    `toml:"scan_interval"`
-	Engine       string `toml:"engine"`
-	VAAPIDevice  string `toml:"vaapi_device"`
-	FFmpegPath   string `toml:"ffmpeg_path"`
-	FFprobePath  string `toml:"ffprobe_path"`
-	Debug        bool   `toml:"debug"`
-	ForceMP4     bool   `toml:"force_mp4"`
-	FaststartMP4 bool   `toml:"faststart_mp4"`
-	FastMode     bool   `toml:"fast_mode"`
+	SourceDir    []string `toml:"source_dir"`
+	SourceDirs   []string `toml:"source_dirs"`
+	WorkDir      string   `toml:"work_dir"`
+	Interactive  bool     `toml:"interactive"`
+	Keep         bool     `toml:"keep"`
+	Silent       bool     `toml:"silent"`
+	Workers      int      `toml:"workers"`
+	ScanInterval int      `toml:"scan_interval"`
+	Engine       string   `toml:"engine"`
+	VAAPIDevice  string   `toml:"vaapi_device"`
+	FFmpegPath   string   `toml:"ffmpeg_path"`
+	FFprobePath  string   `toml:"ffprobe_path"`
+	Debug        bool     `toml:"debug"`
+	ForceMP4     bool     `toml:"force_mp4"`
+	FaststartMP4 bool     `toml:"faststart_mp4"`
+	FastMode     bool     `toml:"fast_mode"`
 }
 
 // LoadFromFile reads and parses a TOML configuration file.
@@ -46,9 +47,14 @@ func LoadFromFile(path string) (*runner.Config, error) {
 		return nil, fmt.Errorf("failed to parse TOML config: %w", err)
 	}
 
+	// Merge source_dir and source_dirs into SourceDirs slice
+	var sourceDirs []string
+	sourceDirs = append(sourceDirs, tomlCfg.SourceDir...)
+	sourceDirs = append(sourceDirs, tomlCfg.SourceDirs...)
+
 	// Convert to runner.Config
 	cfg := &runner.Config{
-		SourceDir:    tomlCfg.SourceDir,
+		SourceDirs:   sourceDirs,
 		WorkDir:      tomlCfg.WorkDir,
 		Interactive:  tomlCfg.Interactive,
 		Keep:         tomlCfg.Keep,
@@ -83,9 +89,17 @@ func GenerateDefault(path string) error {
 # PATHS
 # ============================================================================
 
-# source_dir: Directory containing video files to transcode
+# source_dir: Single directory containing video files to transcode
 # Default: current directory
 # source_dir = "/path/to/videos"
+
+# source_dirs: Multiple directories to scan for video files
+# You can specify either source_dir OR source_dirs (or both - they will be merged)
+# source_dirs = [
+#     "/path/to/videos1",
+#     "/path/to/videos2",
+#     "/mnt/media/movies"
+# ]
 
 # work_dir: Directory where transcoded files will be saved
 # Default: current directory
@@ -194,6 +208,12 @@ func GenerateDefault(path string) error {
 # engine = "vaapi"
 # vaapi_device = "/dev/dri/renderD128"
 # workers = 4
+
+# Example 5: Multiple source directories
+# source_dirs = ["/mnt/tv", "/mnt/movies", "/home/user/videos"]
+# work_dir = "/mnt/transcoded"
+# engine = "vaapi"
+# workers = 2
 `
 
 	// Write the file
@@ -212,9 +232,9 @@ func MergeConfigs(configFile, cliFlags *runner.Config) *runner.Config {
 	merged := *configFile
 
 	// Override with CLI flags if they were explicitly set
-	// For strings, we check if they're non-empty AND different from defaults
-	if cliFlags.SourceDir != "" {
-		merged.SourceDir = cliFlags.SourceDir
+	// For SourceDirs slice, override if CLI has any values
+	if len(cliFlags.SourceDirs) > 0 {
+		merged.SourceDirs = cliFlags.SourceDirs
 	}
 	if cliFlags.WorkDir != "" {
 		merged.WorkDir = cliFlags.WorkDir

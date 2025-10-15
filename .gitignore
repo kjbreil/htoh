@@ -2,3 +2,4 @@
 .serena/
 config.toml
 bin/opti
+/opti

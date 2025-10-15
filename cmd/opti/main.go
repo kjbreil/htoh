@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -14,8 +15,20 @@ import (
 	"opti.local/opti/internal/web"
 )
 
+// stringSlice is a custom flag type that allows multiple values
+type stringSlice []string
+
+func (s *stringSlice) String() string {
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSlice) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
+
 var (
-	sourceDir      = flag.String("s", "", "Source directory of videos")
+	sourceDirs     stringSlice
 	workDir        = flag.String("w", "", "Working directory (temp/state & outputs)")
 	interactive    = flag.Bool("I", false, "Interactive (prompt) mode")
 	keep           = flag.Bool("k", false, "Keep intermediates (reserved)")
@@ -41,6 +54,7 @@ var (
 const Version = "0.3.3"
 
 func main() {
+	flag.Var(&sourceDirs, "s", "Source directory of videos (can be specified multiple times)")
 	flag.Parse()
 	if *version {
 		fmt.Println("opti", Version)
@@ -84,7 +98,7 @@ func main() {
 
 	// Build CLI flags config
 	cliConfig := runner.Config{
-		SourceDir:    *sourceDir,
+		SourceDirs:   sourceDirs,
 		WorkDir:      *workDir,
 		Interactive:  *interactive,
 		Keep:         *keep,
@@ -113,7 +127,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "opti:", err)
 		os.Exit(1)
 	}
-	if cfg.SourceDir == "" || cfg.WorkDir == "" {
+	if len(cfg.SourceDirs) == 0 || cfg.WorkDir == "" {
 		fmt.Fprintln(os.Stderr, "usage: -s <source> -w <workdir> [options]")
 		os.Exit(2)
 	}

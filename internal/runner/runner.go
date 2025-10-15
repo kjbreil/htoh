@@ -18,7 +18,7 @@ import (
 )
 
 type Config struct {
-	SourceDir    string
+	SourceDirs   []string
 	WorkDir      string
 	Interactive  bool
 	Keep         bool
@@ -87,18 +87,27 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// Continuous scanning loop
 	for {
-		// Scan directory
+		// Scan directories
 		if !cfg.Silent {
-			fmt.Println("Scanning directory...")
+			if len(cfg.SourceDirs) == 1 {
+				fmt.Println("Scanning directory...")
+			} else {
+				fmt.Printf("Scanning %d directories...\n", len(cfg.SourceDirs))
+			}
 		}
 
-		files, err := listCandidates(ctx, ffprobePath, cfg.SourceDir, db, cfg.Debug)
-		if err != nil {
-			return err
+		// Aggregate candidates from all source directories
+		var allFiles []candidate
+		for _, sourceDir := range cfg.SourceDirs {
+			files, err := listCandidates(ctx, ffprobePath, sourceDir, db, cfg.Debug)
+			if err != nil {
+				return err
+			}
+			allFiles = append(allFiles, files...)
 		}
 
 		if !cfg.Silent {
-			fmt.Printf("Found %d video file(s). Database updated.\n", len(files))
+			fmt.Printf("Found %d video file(s). Database updated.\n", len(allFiles))
 		}
 
 		// Check if we should scan continuously or exit

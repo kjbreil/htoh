@@ -313,6 +313,32 @@
             margin-bottom: 15px;
             opacity: 0.3;
         }
+
+        .source-tree {
+            margin-bottom: 30px;
+        }
+
+        .source-tree:last-child {
+            margin-bottom: 0;
+        }
+
+        .source-header {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-bottom: 2px solid #4a9eff;
+            padding: 12px 15px;
+            margin-bottom: 10px;
+            font-size: 14px;
+            color: #4a9eff;
+            font-weight: bold;
+        }
+
+        .source-path {
+            color: #888;
+            font-weight: normal;
+            margin-left: 10px;
+            font-size: 12px;
+        }
     </style>
 </head>
 <body>
@@ -386,13 +412,36 @@
         function loadTree() {
             fetch('/api/tree')
                 .then(r => r.json())
-                .then(tree => {
-                    document.getElementById('tree-container').innerHTML = renderTree(tree);
+                .then(data => {
+                    // Check if response is an array (multiple sources) or single object
+                    if (Array.isArray(data)) {
+                        document.getElementById('tree-container').innerHTML = renderMultipleTrees(data);
+                    } else {
+                        document.getElementById('tree-container').innerHTML = renderTree(data);
+                    }
                 })
                 .catch(err => {
                     document.getElementById('tree-container').innerHTML =
                         '<div class="loading" style="color: #f44336;">Error loading tree: ' + err.message + '</div>';
                 });
+        }
+
+        function renderMultipleTrees(trees) {
+            if (!trees || trees.length === 0) {
+                return '<div class="empty-state"><div class="empty-state-icon">📁</div><div>No source directories configured</div></div>';
+            }
+
+            let html = '';
+            for (const tree of trees) {
+                html += '<div class="source-tree">';
+                html += '<div class="source-header">';
+                html += '📁 ' + escapeHtml(tree.name);
+                html += '<span class="source-path">' + escapeHtml(tree.path) + '</span>';
+                html += '</div>';
+                html += renderTree(tree);
+                html += '</div>';
+            }
+            return html;
         }
 
         function renderTree(node, level = 0) {

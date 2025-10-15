@@ -10,11 +10,11 @@ import (
 type EventType string
 
 const (
-	EventQueueAdded      EventType = "queue_added"
-	EventQueueUpdated    EventType = "queue_updated"
-	EventStatusChanged   EventType = "status_changed"
-	EventProgressUpdate  EventType = "progress_update"
-	EventScanComplete    EventType = "scan_complete"
+	EventQueueAdded     EventType = "queue_added"
+	EventQueueUpdated   EventType = "queue_updated"
+	EventStatusChanged  EventType = "status_changed"
+	EventProgressUpdate EventType = "progress_update"
+	EventScanComplete   EventType = "scan_complete"
 )
 
 // Event represents a server-sent event

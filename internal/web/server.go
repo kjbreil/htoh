@@ -31,7 +31,7 @@ func NewServer(db *gorm.DB, cfg runner.Config, queueProc *runner.QueueProcessor)
 
 	// Parse templates
 	tmpl, err := template.New("").Funcs(template.FuncMap{
-		"formatSize": formatSize,
+		"formatSize":  formatSize,
 		"formatCodec": formatCodec,
 	}).ParseGlob(filepath.Join("internal", "web", "templates", "*.html"))
 	if err != nil {
@@ -89,41 +89,69 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 // TreeNode represents a node in the directory tree
 type TreeNode struct {
-	Name     string      `json:"name"`
-	Path     string      `json:"path"`
-	IsDir    bool        `json:"is_dir"`
-	FileID   uint        `json:"file_id,omitempty"`
-	Codec    string      `json:"codec,omitempty"`
-	Size     int64       `json:"size,omitempty"`
-	Status   string      `json:"status,omitempty"`
-	Children []TreeNode  `json:"children,omitempty"`
+	Name     string       `json:"name"`
+	Path     string       `json:"path"`
+	IsDir    bool         `json:"is_dir"`
+	FileID   uint         `json:"file_id,omitempty"`
+	Codec    string       `json:"codec,omitempty"`
+	Size     int64        `json:"size,omitempty"`
+	Status   string       `json:"status,omitempty"`
+	Children []TreeNode   `json:"children,omitempty"`
 	Stats    *FolderStats `json:"stats,omitempty"`
 }
 
 // FolderStats represents aggregate statistics for a folder
 type FolderStats struct {
-	TotalFiles int              `json:"total_files"`
-	TotalSize  int64            `json:"total_size"`
-	CodecCount map[string]int   `json:"codec_count"`
-	H264Count  int              `json:"h264_count"`
+	TotalFiles int            `json:"total_files"`
+	TotalSize  int64          `json:"total_size"`
+	CodecCount map[string]int `json:"codec_count"`
+	H264Count  int            `json:"h264_count"`
 }
 
 // handleTree returns the directory tree structure
 func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
+
 	if path == "" {
-		path = s.cfg.SourceDir
-	}
+		// No specific path - return tree(s) for all source directories
+		if len(s.cfg.SourceDirs) == 0 {
+			http.Error(w, "No source directories configured", http.StatusInternalServerError)
+			return
+		}
 
-	// Build tree
-	tree, err := s.buildTree(path)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		if len(s.cfg.SourceDirs) == 1 {
+			// Single source directory - return single TreeNode for backward compatibility
+			tree, err := s.buildTree(s.cfg.SourceDirs[0])
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(tree)
+		} else {
+			// Multiple source directories - return array of TreeNode
+			var trees []TreeNode
+			for _, sourceDir := range s.cfg.SourceDirs {
+				tree, err := s.buildTree(sourceDir)
+				if err != nil {
+					// Log error but continue with other directories
+					continue
+				}
+				trees = append(trees, *tree)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(trees)
+		}
+	} else {
+		// Specific path provided - return single TreeNode
+		tree, err := s.buildTree(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(tree)
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(tree)
 }
 
 // buildTree builds a directory tree structure

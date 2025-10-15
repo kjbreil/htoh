@@ -25,9 +25,9 @@ type File struct {
 
 // MediaInfo stores ffprobe results, one-to-one with File
 type MediaInfo struct {
-	ID        uint   `gorm:"primaryKey"`
-	FileID    uint   `gorm:"uniqueIndex;not null"` // foreign key
-	File      *File  `gorm:"foreignKey:FileID"`
+	ID     uint  `gorm:"primaryKey"`
+	FileID uint  `gorm:"uniqueIndex;not null"` // foreign key
+	File   *File `gorm:"foreignKey:FileID"`
 
 	// Container/Format
 	Duration      float64 // in seconds
@@ -35,8 +35,8 @@ type MediaInfo struct {
 	Container     string  // mkv, mp4, etc
 
 	// Video Stream
-	VideoCodec   string  // h264, hevc, etc
-	VideoProfile string  // high, main, etc
+	VideoCodec   string // h264, hevc, etc
+	VideoProfile string // high, main, etc
 	Width        int
 	Height       int
 	CodedWidth   int
@@ -59,13 +59,13 @@ type MediaInfo struct {
 
 // QueueItem represents a file in the transcoding queue
 type QueueItem struct {
-	ID           uint      `gorm:"primaryKey"`
-	FileID       uint      `gorm:"index;not null"` // foreign key to File
-	File         *File     `gorm:"foreignKey:FileID"`
-	Status       string    `gorm:"index"` // queued, processing, done, failed
-	Priority     int       `gorm:"default:0"`
-	QualityLevel int       `gorm:"default:0"` // for future use
-	ErrorMessage string    // error details if status is failed
+	ID           uint   `gorm:"primaryKey"`
+	FileID       uint   `gorm:"index;not null"` // foreign key to File
+	File         *File  `gorm:"foreignKey:FileID"`
+	Status       string `gorm:"index"` // queued, processing, done, failed
+	Priority     int    `gorm:"default:0"`
+	QualityLevel int    `gorm:"default:0"` // for future use
+	ErrorMessage string // error details if status is failed
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
@@ -189,12 +189,12 @@ func AddToQueue(db *gorm.DB, fileID uint, priority int) error {
 	// Check if already in queue
 	var existing QueueItem
 	result := db.Where("file_id = ? AND status IN ?", fileID, []string{"queued", "processing"}).First(&existing)
-	
+
 	if result.Error == nil {
 		// Already in queue
 		return nil
 	}
-	
+
 	if result.Error != gorm.ErrRecordNotFound {
 		return fmt.Errorf("failed to check queue: %w", result.Error)
 	}
@@ -205,11 +205,11 @@ func AddToQueue(db *gorm.DB, fileID uint, priority int) error {
 		Status:   "queued",
 		Priority: priority,
 	}
-	
+
 	if err := db.Create(queueItem).Error; err != nil {
 		return fmt.Errorf("failed to add to queue: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -220,11 +220,11 @@ func GetNextQueueItem(db *gorm.DB) (*QueueItem, error) {
 		Order("priority DESC, created_at ASC").
 		Preload("File").
 		First(&item)
-	
+
 	if result.Error != nil {
 		return nil, result.Error
 	}
-	
+
 	return &item, nil
 }
 
@@ -233,15 +233,15 @@ func UpdateQueueItemStatus(db *gorm.DB, id uint, status string, errorMsg string)
 	updates := map[string]interface{}{
 		"status": status,
 	}
-	
+
 	if errorMsg != "" {
 		updates["error_message"] = errorMsg
 	}
-	
+
 	if err := db.Model(&QueueItem{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 		return fmt.Errorf("failed to update queue item status: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -249,16 +249,16 @@ func UpdateQueueItemStatus(db *gorm.DB, id uint, status string, errorMsg string)
 func GetQueueItems(db *gorm.DB, status string) ([]QueueItem, error) {
 	var items []QueueItem
 	query := db.Preload("File")
-	
+
 	if status != "" {
 		query = query.Where("status = ?", status)
 	}
-	
+
 	result := query.Order("priority DESC, created_at ASC").Find(&items)
 	if result.Error != nil {
 		return nil, result.Error
 	}
-	
+
 	return items, nil
 }
 
