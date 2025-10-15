@@ -11,22 +11,20 @@ import (
 // TomlConfig represents the TOML configuration file structure.
 // All fields use snake_case TOML tags to match common configuration conventions.
 type TomlConfig struct {
-	SourceDir      string `toml:"source_dir"`
-	WorkDir        string `toml:"work_dir"`
-	Interactive    bool   `toml:"interactive"`
-	Keep           bool   `toml:"keep"`
-	Silent         bool   `toml:"silent"`
-	Workers        int    `toml:"workers"`
-	Engine         string `toml:"engine"`
-	VAAPIDevice    string `toml:"vaapi_device"`
-	FFmpegPath     string `toml:"ffmpeg_path"`
-	FFprobePath    string `toml:"ffprobe_path"`
-	Debug          bool   `toml:"debug"`
-	ForceMP4       bool   `toml:"force_mp4"`
-	FaststartMP4   bool   `toml:"faststart_mp4"`
-	FastMode       bool   `toml:"fast_mode"`
-	SwapInplace    bool   `toml:"swap_inplace"`
-	DeleteOriginal bool   `toml:"delete_original"`
+	SourceDir    string `toml:"source_dir"`
+	WorkDir      string `toml:"work_dir"`
+	Interactive  bool   `toml:"interactive"`
+	Keep         bool   `toml:"keep"`
+	Silent       bool   `toml:"silent"`
+	Workers      int    `toml:"workers"`
+	Engine       string `toml:"engine"`
+	VAAPIDevice  string `toml:"vaapi_device"`
+	FFmpegPath   string `toml:"ffmpeg_path"`
+	FFprobePath  string `toml:"ffprobe_path"`
+	Debug        bool   `toml:"debug"`
+	ForceMP4     bool   `toml:"force_mp4"`
+	FaststartMP4 bool   `toml:"faststart_mp4"`
+	FastMode     bool   `toml:"fast_mode"`
 }
 
 // LoadFromFile reads and parses a TOML configuration file.
@@ -49,22 +47,20 @@ func LoadFromFile(path string) (*runner.Config, error) {
 
 	// Convert to runner.Config
 	cfg := &runner.Config{
-		SourceDir:      tomlCfg.SourceDir,
-		WorkDir:        tomlCfg.WorkDir,
-		Interactive:    tomlCfg.Interactive,
-		Keep:           tomlCfg.Keep,
-		Silent:         tomlCfg.Silent,
-		Workers:        tomlCfg.Workers,
-		Engine:         tomlCfg.Engine,
-		VAAPIDevice:    tomlCfg.VAAPIDevice,
-		FFmpegPath:     tomlCfg.FFmpegPath,
-		FFprobePath:    tomlCfg.FFprobePath,
-		Debug:          tomlCfg.Debug,
-		ForceMP4:       tomlCfg.ForceMP4,
-		FaststartMP4:   tomlCfg.FaststartMP4,
-		FastMode:       tomlCfg.FastMode,
-		SwapInplace:    tomlCfg.SwapInplace,
-		DeleteOriginal: tomlCfg.DeleteOriginal,
+		SourceDir:    tomlCfg.SourceDir,
+		WorkDir:      tomlCfg.WorkDir,
+		Interactive:  tomlCfg.Interactive,
+		Keep:         tomlCfg.Keep,
+		Silent:       tomlCfg.Silent,
+		Workers:      tomlCfg.Workers,
+		Engine:       tomlCfg.Engine,
+		VAAPIDevice:  tomlCfg.VAAPIDevice,
+		FFmpegPath:   tomlCfg.FFmpegPath,
+		FFprobePath:  tomlCfg.FFprobePath,
+		Debug:        tomlCfg.Debug,
+		ForceMP4:     tomlCfg.ForceMP4,
+		FaststartMP4: tomlCfg.FaststartMP4,
+		FastMode:     tomlCfg.FastMode,
 	}
 
 	return cfg, nil
@@ -160,18 +156,6 @@ func GenerateDefault(path string) error {
 # Default: true
 # faststart_mp4 = true
 
-# swap_inplace: Replace original files with transcoded versions
-# Creates .original backup of source files
-# WARNING: Use with caution - modifies your original files!
-# Default: false
-# swap_inplace = false
-
-# delete_original: Delete .original backup files after successful swap
-# Only applies when swap_inplace = true
-# WARNING: This permanently removes your original files!
-# Default: false
-# delete_original = false
-
 # ============================================================================
 # ADVANCED OPTIONS
 # ============================================================================
@@ -195,9 +179,8 @@ func GenerateDefault(path string) error {
 # workers = 2
 # force_mp4 = true
 
-# Example 3: Intel hardware acceleration with in-place replacement
+# Example 3: Intel hardware acceleration
 # engine = "qsv"
-# swap_inplace = true
 # workers = 4
 
 # Example 4: AMD GPU with VAAPI (Linux)
@@ -268,12 +251,6 @@ func MergeConfigs(configFile, cliFlags *runner.Config) *runner.Config {
 	}
 	if cliFlags.FastMode {
 		merged.FastMode = true
-	}
-	if cliFlags.SwapInplace {
-		merged.SwapInplace = true
-	}
-	if cliFlags.DeleteOriginal {
-		merged.DeleteOriginal = true
 	}
 
 	return &merged

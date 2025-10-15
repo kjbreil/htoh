@@ -18,22 +18,20 @@ import (
 )
 
 type Config struct {
-	SourceDir      string
-	WorkDir        string
-	Interactive    bool
-	Keep           bool
-	Silent         bool
-	Workers        int
-	Engine         string // cpu|qsv|nvenc|vaapi
-	VAAPIDevice    string // Hardware device path for VAAPI (e.g., /dev/dri/renderD128)
-	FFmpegPath     string
-	FFprobePath    string
-	Debug          bool
-	ForceMP4       bool
-	FaststartMP4   bool
-	FastMode       bool
-	SwapInplace    bool
-	DeleteOriginal bool // Delete .original backup after successful swap (requires SwapInplace)
+	SourceDir    string
+	WorkDir      string
+	Interactive  bool
+	Keep         bool
+	Silent       bool
+	Workers      int
+	Engine       string // cpu|qsv|nvenc|vaapi
+	VAAPIDevice  string // Hardware device path for VAAPI (e.g., /dev/dri/renderD128)
+	FFmpegPath   string
+	FFprobePath  string
+	Debug        bool
+	ForceMP4     bool
+	FaststartMP4 bool
+	FastMode     bool
 }
 
 type qualityChoice struct {
@@ -146,7 +144,7 @@ func Run(ctx context.Context, cfg Config) error {
 		if err != nil {
 			rel = filepath.Base(pi.path)
 		}
-		base := filepath.Join(cfg.WorkDir, rel)
+		base := filepath.Join(cfg.WorkDir, filepath.Base(pi.path))
 		container := "mkv"
 		if cfg.ForceMP4 || (cfg.FaststartMP4 && strings.EqualFold(filepath.Ext(pi.path), ".mp4")) {
 			container = "mp4"
@@ -343,7 +341,7 @@ func clampRange(val, min, max int) int {
 }
 
 func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog) error {
-	if err := os.MkdirAll(filepath.Dir(jb.OutTarget), 0o755); err != nil {
+	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
 		return err
 	}
 
@@ -537,10 +535,9 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 	if waitErr != nil {
 		return waitErr
 	}
-	if cfg.SwapInplace {
-		if err := SwapInPlaceCopy(jb.Src, jb.OutTarget, cfg.DeleteOriginal); err != nil {
-			return err
-		}
+	// Always swap in-place and delete the original backup
+	if err := SwapInPlaceCopy(jb.Src, jb.OutTarget, true); err != nil {
+		return err
 	}
 	return nil
 }
