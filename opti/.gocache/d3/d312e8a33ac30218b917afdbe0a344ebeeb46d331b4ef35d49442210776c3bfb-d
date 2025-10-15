@@ -1,7 +1,0 @@
-./ffmpeg_caps.go
-./ffprobe.go
-./progress.go
-./runner.go
-./state.go
-./swap_inplace.go
-./ffmpeg_caps_test.go

@@ -61,6 +61,13 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("load state: %w", err)
 	}
 
+	// Set default ffmpeg path if not provided
+	ffmpegPath := strings.TrimSpace(cfg.FFmpegPath)
+	if ffmpegPath == "" {
+		ffmpegPath = "ffmpeg"
+	}
+	cfg.FFmpegPath = ffmpegPath
+
 	ffprobePath := strings.TrimSpace(cfg.FFprobePath)
 	if ffprobePath == "" {
 		ffprobePath = "ffprobe"
