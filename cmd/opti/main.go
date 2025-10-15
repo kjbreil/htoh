@@ -5,10 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"time"
+	"os/signal"
+	"sync"
+	"syscall"
 
 	"opti.local/opti/internal/config"
 	"opti.local/opti/internal/runner"
+	"opti.local/opti/internal/web"
 )
 
 var (
@@ -32,6 +35,7 @@ var (
 	configPath     = flag.String("c", "", "Path to TOML config file (config values override CLI flags)")
 	configPathLong = flag.String("config", "", "Path to TOML config file (same as -c)")
 	generateConfig = flag.String("generate-config", "", "Generate a default config file at the specified path and exit")
+	port           = flag.Int("port", 8080, "HTTP server port for web interface")
 )
 
 const Version = "0.3.3"
@@ -117,14 +121,74 @@ func main() {
 		cfg.Workers = 1
 	}
 
+	// Initialize database
+	db, err := runner.InitDB(cfg.WorkDir, cfg.Debug)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "opti: failed to initialize database: %v\n", err)
+		os.Exit(1)
+	}
+	if !cfg.Silent {
+		fmt.Println("Database initialized.")
+	}
+
+	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// In case someone wants a hard cap:
-	_ = ctx
-	_ = time.Hour
 
-	if err := runner.Run(context.Background(), cfg); err != nil {
-		fmt.Fprintln(os.Stderr, "opti:", err)
+	// Setup signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Create queue processor
+	queueProc := runner.NewQueueProcessor(db, cfg)
+
+	// Create web server
+	webServer, err := web.NewServer(db, cfg, queueProc)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "opti: failed to create web server: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Wait group for all goroutines
+	var wg sync.WaitGroup
+
+	// Start web server
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := webServer.Start(ctx, *port); err != nil {
+			fmt.Fprintf(os.Stderr, "opti: web server error: %v\n", err)
+		}
+	}()
+
+	// Start queue processor
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := queueProc.Start(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "opti: queue processor error: %v\n", err)
+		}
+	}()
+
+	// Start scanner
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := runner.Run(ctx, cfg); err != nil && err != context.Canceled {
+			fmt.Fprintf(os.Stderr, "opti: scanner error: %v\n", err)
+		}
+	}()
+
+	// Wait for shutdown signal
+	<-sigChan
+	if !cfg.Silent {
+		fmt.Println("\nShutting down...")
+	}
+	cancel()
+
+	// Wait for all goroutines to finish
+	wg.Wait()
+	if !cfg.Silent {
+		fmt.Println("Shutdown complete.")
 	}
 }

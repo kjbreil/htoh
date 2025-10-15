@@ -57,6 +57,19 @@ type MediaInfo struct {
 	UpdatedAt time.Time
 }
 
+// QueueItem represents a file in the transcoding queue
+type QueueItem struct {
+	ID           uint      `gorm:"primaryKey"`
+	FileID       uint      `gorm:"index;not null"` // foreign key to File
+	File         *File     `gorm:"foreignKey:FileID"`
+	Status       string    `gorm:"index"` // queued, processing, done, failed
+	Priority     int       `gorm:"default:0"`
+	QualityLevel int       `gorm:"default:0"` // for future use
+	ErrorMessage string    // error details if status is failed
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 // InitDB initializes the SQLite database with GORM
 func InitDB(workDir string, debug bool) (*gorm.DB, error) {
 	// Create workDir if it doesn't exist
@@ -82,7 +95,7 @@ func InitDB(workDir string, debug bool) (*gorm.DB, error) {
 	}
 
 	// Run migrations
-	if err := db.AutoMigrate(&File{}, &MediaInfo{}); err != nil {
+	if err := db.AutoMigrate(&File{}, &MediaInfo{}, &QueueItem{}); err != nil {
 		return nil, fmt.Errorf("failed to migrate database: %w", err)
 	}
 
@@ -169,4 +182,90 @@ func GetMediaInfoByFileID(db *gorm.DB, fileID uint) (*MediaInfo, error) {
 		return nil, result.Error
 	}
 	return &info, nil
+}
+
+// AddToQueue adds a file to the transcoding queue
+func AddToQueue(db *gorm.DB, fileID uint, priority int) error {
+	// Check if already in queue
+	var existing QueueItem
+	result := db.Where("file_id = ? AND status IN ?", fileID, []string{"queued", "processing"}).First(&existing)
+	
+	if result.Error == nil {
+		// Already in queue
+		return nil
+	}
+	
+	if result.Error != gorm.ErrRecordNotFound {
+		return fmt.Errorf("failed to check queue: %w", result.Error)
+	}
+
+	// Add to queue
+	queueItem := &QueueItem{
+		FileID:   fileID,
+		Status:   "queued",
+		Priority: priority,
+	}
+	
+	if err := db.Create(queueItem).Error; err != nil {
+		return fmt.Errorf("failed to add to queue: %w", err)
+	}
+	
+	return nil
+}
+
+// GetNextQueueItem retrieves the next item to process from the queue
+func GetNextQueueItem(db *gorm.DB) (*QueueItem, error) {
+	var item QueueItem
+	result := db.Where("status = ?", "queued").
+		Order("priority DESC, created_at ASC").
+		Preload("File").
+		First(&item)
+	
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	
+	return &item, nil
+}
+
+// UpdateQueueItemStatus updates the status of a queue item
+func UpdateQueueItemStatus(db *gorm.DB, id uint, status string, errorMsg string) error {
+	updates := map[string]interface{}{
+		"status": status,
+	}
+	
+	if errorMsg != "" {
+		updates["error_message"] = errorMsg
+	}
+	
+	if err := db.Model(&QueueItem{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+		return fmt.Errorf("failed to update queue item status: %w", err)
+	}
+	
+	return nil
+}
+
+// GetQueueItems retrieves all queue items with optional status filter
+func GetQueueItems(db *gorm.DB, status string) ([]QueueItem, error) {
+	var items []QueueItem
+	query := db.Preload("File")
+	
+	if status != "" {
+		query = query.Where("status = ?", status)
+	}
+	
+	result := query.Order("priority DESC, created_at ASC").Find(&items)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	
+	return items, nil
+}
+
+// DeleteQueueItem removes a queue item by ID
+func DeleteQueueItem(db *gorm.DB, id uint) error {
+	if err := db.Delete(&QueueItem{}, id).Error; err != nil {
+		return fmt.Errorf("failed to delete queue item: %w", err)
+	}
+	return nil
 }

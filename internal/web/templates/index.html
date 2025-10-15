@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>opti - Video Transcoder</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Courier New', monospace;
+            background: #1a1a1a;
+            color: #e0e0e0;
+            padding: 0;
+            line-height: 1.4;
+        }
+
+        .header {
+            background: #0a0a0a;
+            border-bottom: 2px solid #333;
+            padding: 15px 20px;
+        }
+
+        .header h1 {
+            font-size: 18px;
+            font-weight: normal;
+            color: #4a9eff;
+        }
+
+        .tabs {
+            background: #0f0f0f;
+            border-bottom: 1px solid #333;
+            padding: 0 20px;
+            display: flex;
+            gap: 0;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border: none;
+            background: none;
+            color: #888;
+            border-bottom: 2px solid transparent;
+            font-family: inherit;
+            font-size: 14px;
+        }
+
+        .tab.active {
+            color: #4a9eff;
+            border-bottom-color: #4a9eff;
+        }
+
+        .content {
+            padding: 20px;
+            max-width: 1400px;
+        }
+
+        .tree {
+            list-style: none;
+        }
+
+        .tree-item {
+            margin: 2px 0;
+        }
+
+        .tree-node {
+            display: flex;
+            align-items: center;
+            padding: 6px 8px;
+            border: 1px solid #2a2a2a;
+            background: #151515;
+            margin-bottom: 2px;
+        }
+
+        .tree-node:hover {
+            background: #1f1f1f;
+            border-color: #3a3a3a;
+        }
+
+        .tree-node.collapsed > .tree-children {
+            display: none;
+        }
+
+        .tree-toggle {
+            width: 20px;
+            height: 20px;
+            background: none;
+            border: 1px solid #444;
+            color: #888;
+            cursor: pointer;
+            margin-right: 8px;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+        }
+
+        .tree-toggle:hover {
+            border-color: #666;
+            color: #aaa;
+        }
+
+        .tree-toggle.empty {
+            visibility: hidden;
+        }
+
+        .tree-icon {
+            margin-right: 8px;
+            color: #666;
+        }
+
+        .tree-name {
+            flex: 1;
+            font-size: 13px;
+        }
+
+        .tree-info {
+            display: flex;
+            gap: 15px;
+            margin-right: 15px;
+            font-size: 12px;
+            color: #888;
+        }
+
+        .tree-codec {
+            color: #f0a040;
+        }
+
+        .tree-codec.h264 {
+            color: #ff6b6b;
+        }
+
+        .tree-codec.hevc {
+            color: #51cf66;
+        }
+
+        .tree-status {
+            padding: 2px 8px;
+            border-radius: 2px;
+            font-size: 11px;
+            text-transform: uppercase;
+        }
+
+        .tree-status.queued {
+            background: #3a3a00;
+            color: #ffeb3b;
+        }
+
+        .tree-status.processing {
+            background: #003a3a;
+            color: #00bcd4;
+        }
+
+        .tree-status.done {
+            background: #003a00;
+            color: #4caf50;
+        }
+
+        .tree-status.failed {
+            background: #3a0000;
+            color: #f44336;
+        }
+
+        .tree-children {
+            margin-left: 30px;
+            margin-top: 2px;
+        }
+
+        .btn {
+            padding: 6px 12px;
+            background: #2a2a2a;
+            border: 1px solid #444;
+            color: #e0e0e0;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 12px;
+        }
+
+        .btn:hover {
+            background: #3a3a3a;
+            border-color: #555;
+        }
+
+        .btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: #1a4a7a;
+            border-color: #2a5a8a;
+            color: #4a9eff;
+        }
+
+        .btn-primary:hover {
+            background: #2a5a8a;
+            border-color: #3a6a9a;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #333;
+            border-top-color: #4a9eff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #0f0f0f;
+            border: 1px solid #4a9eff;
+            padding: 15px 20px;
+            border-radius: 2px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            z-index: 1000;
+            max-width: 400px;
+        }
+
+        .folder-stats {
+            font-size: 11px;
+            color: #666;
+            margin-left: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>opti - Video Transcoder</h1>
+    </div>
+
+    <div class="tabs">
+        <button class="tab active">Files</button>
+    </div>
+
+    <div class="content">
+        <div id="tree-container">
+            <div class="loading">
+                <div class="spinner"></div>
+                <div style="margin-top: 10px;">Loading file tree...</div>
+            </div>
+        </div>
+    </div>
+
+    <div id="notifications"></div>
+
+    <script>
+        // Initialize SSE connection
+        const eventSource = new EventSource('/api/events');
+
+        eventSource.addEventListener('connected', (e) => {
+            console.log('Connected to event stream');
+        });
+
+        eventSource.addEventListener('queue_added', (e) => {
+            const data = JSON.parse(e.data);
+            showNotification('File added to queue: ' + data.data.file_name);
+            // Reload tree to update status
+            setTimeout(() => loadTree(), 500);
+        });
+
+        eventSource.addEventListener('queue_updated', (e) => {
+            const data = JSON.parse(e.data);
+            // Reload tree to update status
+            loadTree();
+        });
+
+        eventSource.addEventListener('scan_complete', (e) => {
+            const data = JSON.parse(e.data);
+            showNotification('Scan complete: ' + data.data.file_count + ' files found');
+            loadTree();
+        });
+
+        // Load tree on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            loadTree();
+        });
+
+        function loadTree() {
+            fetch('/api/tree')
+                .then(r => r.json())
+                .then(tree => {
+                    document.getElementById('tree-container').innerHTML = renderTree(tree);
+                })
+                .catch(err => {
+                    document.getElementById('tree-container').innerHTML =
+                        '<div class="loading" style="color: #f44336;">Error loading tree: ' + err.message + '</div>';
+                });
+        }
+
+        function renderTree(node, level = 0) {
+            if (!node) return '';
+
+            const isRoot = level === 0;
+            const hasChildren = node.children && node.children.length > 0;
+            const codecClass = node.codec ? node.codec.toLowerCase() : '';
+            const canConvert = !node.is_dir ?
+                (node.codec === 'h264' || node.codec === 'avc') && node.status !== 'done' :
+                (node.stats && node.stats.h264_count > 0);
+
+            let html = '<div class="tree-item">';
+            html += '<div class="tree-node">';
+
+            // Toggle button (only for directories with children)
+            if (node.is_dir && hasChildren) {
+                html += '<button class="tree-toggle" onclick="toggleNode(this)">▼</button>';
+            } else if (node.is_dir) {
+                html += '<button class="tree-toggle empty"></button>';
+            }
+
+            // Icon
+            html += '<span class="tree-icon">' + (node.is_dir ? '📁' : '📄') + '</span>';
+
+            // Name
+            html += '<span class="tree-name">' + escapeHtml(node.name) + '</span>';
+
+            // Stats for folders
+            if (node.is_dir && node.stats) {
+                html += '<span class="folder-stats">';
+                html += node.stats.total_files + ' files';
+                if (node.stats.h264_count > 0) {
+                    html += ' (' + node.stats.h264_count + ' H.264)';
+                }
+                html += ' • ' + formatSize(node.stats.total_size);
+                html += '</span>';
+            }
+
+            // Info
+            html += '<div class="tree-info">';
+            if (node.codec) {
+                html += '<span class="tree-codec ' + codecClass + '">' + formatCodec(node.codec) + '</span>';
+            }
+            if (node.size && !node.is_dir) {
+                html += '<span>' + formatSize(node.size) + '</span>';
+            }
+            if (node.status) {
+                html += '<span class="tree-status ' + node.status + '">' + node.status + '</span>';
+            }
+            html += '</div>';
+
+            // Convert button
+            if (canConvert) {
+                const disabled = node.status === 'queued' || node.status === 'processing';
+                html += '<button class="btn btn-primary" onclick="convert(\'' +
+                        escapeHtml(node.path) + '\', ' + node.is_dir + ')" ' +
+                        (disabled ? 'disabled' : '') + '>Convert</button>';
+            }
+
+            html += '</div>'; // tree-node
+
+            // Children
+            if (hasChildren) {
+                html += '<div class="tree-children">';
+                for (const child of node.children) {
+                    html += renderTree(child, level + 1);
+                }
+                html += '</div>';
+            }
+
+            html += '</div>'; // tree-item
+
+            return html;
+        }
+
+        function toggleNode(btn) {
+            const node = btn.closest('.tree-node');
+            const children = node.nextElementSibling;
+            if (children && children.classList.contains('tree-children')) {
+                if (children.style.display === 'none') {
+                    children.style.display = 'block';
+                    btn.textContent = '▼';
+                } else {
+                    children.style.display = 'none';
+                    btn.textContent = '▶';
+                }
+            }
+        }
+
+        function convert(path, isDir) {
+            const formData = new FormData();
+            formData.append('path', path);
+            formData.append('is_dir', isDir);
+
+            fetch('/api/convert', {
+                method: 'POST',
+                body: formData
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    showNotification(data.message);
+                } else {
+                    showNotification('Error: ' + data.message, true);
+                }
+            })
+            .catch(err => {
+                showNotification('Error: ' + err.message, true);
+            });
+        }
+
+        function showNotification(message, isError = false) {
+            const container = document.getElementById('notifications');
+            const notif = document.createElement('div');
+            notif.className = 'notification';
+            if (isError) {
+                notif.style.borderColor = '#f44336';
+            }
+            notif.textContent = message;
+            container.appendChild(notif);
+
+            setTimeout(() => {
+                notif.remove();
+            }, 5000);
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function formatSize(bytes) {
+            const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+            let size = bytes;
+            let unitIndex = 0;
+            while (size >= 1024 && unitIndex < units.length - 1) {
+                size /= 1024;
+                unitIndex++;
+            }
+            return size.toFixed(1) + ' ' + units[unitIndex];
+        }
+
+        function formatCodec(codec) {
+            codec = codec.toUpperCase();
+            if (codec === 'H264' || codec === 'AVC') return 'H.264';
+            if (codec === 'HEVC' || codec === 'H265') return 'H.265';
+            return codec;
+        }
+
+        // Collapse all initially
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(() => {
+                document.querySelectorAll('.tree-toggle').forEach(btn => {
+                    if (!btn.classList.contains('empty')) {
+                        toggleNode(btn);
+                    }
+                });
+            }, 100);
+        });
+    </script>
+</body>
+</html>
