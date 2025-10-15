@@ -228,7 +228,7 @@ func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, 
 				Name:    filepath.Base(p),
 				Size:    fileInfo.Size(),
 				ModTime: fileInfo.ModTime(),
-				Status:  "queued",
+				Status:  "discovered",
 			}
 			if err := CreateOrUpdateFile(db, file); err != nil {
 				if debug {

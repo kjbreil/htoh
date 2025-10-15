@@ -35,7 +35,7 @@ var (
 	configPath     = flag.String("c", "", "Path to TOML config file (config values override CLI flags)")
 	configPathLong = flag.String("config", "", "Path to TOML config file (same as -c)")
 	generateConfig = flag.String("generate-config", "", "Generate a default config file at the specified path and exit")
-	port           = flag.Int("port", 8080, "HTTP server port for web interface")
+	port           = flag.Int("port", 8181, "HTTP server port for web interface")
 )
 
 const Version = "0.3.3"

@@ -148,6 +148,11 @@
             text-transform: uppercase;
         }
 
+        .tree-status.discovered {
+            background: #2a2a2a;
+            color: #888;
+        }
+
         .tree-status.queued {
             background: #3a3a00;
             color: #ffeb3b;
@@ -242,6 +247,72 @@
             color: #666;
             margin-left: 10px;
         }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .queue-list {
+            list-style: none;
+        }
+
+        .queue-item {
+            display: flex;
+            align-items: center;
+            padding: 10px 12px;
+            border: 1px solid #2a2a2a;
+            background: #151515;
+            margin-bottom: 2px;
+        }
+
+        .queue-item:hover {
+            background: #1f1f1f;
+            border-color: #3a3a3a;
+        }
+
+        .queue-item-name {
+            flex: 1;
+            font-size: 13px;
+        }
+
+        .queue-item-info {
+            display: flex;
+            gap: 15px;
+            margin-right: 15px;
+            font-size: 12px;
+            color: #888;
+        }
+
+        .progress-bar {
+            width: 200px;
+            height: 6px;
+            background: #2a2a2a;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-right: 15px;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background: #4a9eff;
+            transition: width 0.3s ease;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #666;
+        }
+
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 15px;
+            opacity: 0.3;
+        }
     </style>
 </head>
 <body>
@@ -250,14 +321,26 @@
     </div>
 
     <div class="tabs">
-        <button class="tab active">Files</button>
+        <button class="tab active" onclick="switchTab('files')">Files</button>
+        <button class="tab" onclick="switchTab('queue')">Queue</button>
     </div>
 
     <div class="content">
-        <div id="tree-container">
-            <div class="loading">
-                <div class="spinner"></div>
-                <div style="margin-top: 10px;">Loading file tree...</div>
+        <div id="files-tab" class="tab-content active">
+            <div id="tree-container">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <div style="margin-top: 10px;">Loading file tree...</div>
+                </div>
+            </div>
+        </div>
+
+        <div id="queue-tab" class="tab-content">
+            <div id="queue-container">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <div style="margin-top: 10px;">Loading queue...</div>
+                </div>
             </div>
         </div>
     </div>
@@ -281,8 +364,9 @@
 
         eventSource.addEventListener('queue_updated', (e) => {
             const data = JSON.parse(e.data);
-            // Reload tree to update status
+            // Reload tree and queue to update status
             loadTree();
+            loadQueue();
         });
 
         eventSource.addEventListener('scan_complete', (e) => {
@@ -294,6 +378,9 @@
         // Load tree on page load
         document.addEventListener('DOMContentLoaded', () => {
             loadTree();
+            loadQueue();
+            // Auto-refresh queue every 2 seconds
+            setInterval(loadQueue, 2000);
         });
 
         function loadTree() {
@@ -315,7 +402,7 @@
             const hasChildren = node.children && node.children.length > 0;
             const codecClass = node.codec ? node.codec.toLowerCase() : '';
             const canConvert = !node.is_dir ?
-                (node.codec === 'h264' || node.codec === 'avc') && node.status !== 'done' :
+                (node.codec === 'h264' || node.codec === 'avc') && (node.status === 'discovered' || node.status === '') :
                 (node.stats && node.stats.h264_count > 0);
 
             let html = '<div class="tree-item">';
@@ -467,6 +554,69 @@
                 });
             }, 100);
         });
+
+        // Tab switching
+        function switchTab(tabName) {
+            // Update tab buttons
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+
+            // Update tab content
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            document.getElementById(tabName + '-tab').classList.add('active');
+        }
+
+        // Load queue
+        function loadQueue() {
+            fetch('/api/queue')
+                .then(r => r.json())
+                .then(items => {
+                    document.getElementById('queue-container').innerHTML = renderQueue(items);
+                })
+                .catch(err => {
+                    document.getElementById('queue-container').innerHTML =
+                        '<div class="loading" style="color: #f44336;">Error loading queue: ' + err.message + '</div>';
+                });
+        }
+
+        function renderQueue(items) {
+            if (!items || items.length === 0) {
+                return `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📋</div>
+                        <div>No items in queue</div>
+                        <div style="margin-top: 8px; font-size: 12px;">Add files from the Files tab to start transcoding</div>
+                    </div>
+                `;
+            }
+
+            let html = '<ul class="queue-list">';
+            for (const item of items) {
+                const fileName = item.File ? item.File.Name : 'Unknown';
+                const status = item.Status || 'queued';
+                const error = item.ErrorMessage || '';
+
+                html += '<li class="queue-item">';
+                html += '<span class="queue-item-name">' + escapeHtml(fileName) + '</span>';
+
+                html += '<div class="queue-item-info">';
+                html += '<span class="tree-status ' + status + '">' + status + '</span>';
+
+                if (error) {
+                    html += '<span style="color: #f44336;" title="' + escapeHtml(error) + '">⚠ Error</span>';
+                }
+
+                html += '</div>';
+                html += '</li>';
+            }
+            html += '</ul>';
+
+            return html;
+        }
     </script>
 </body>
 </html>
