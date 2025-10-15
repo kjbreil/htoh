@@ -24,7 +24,8 @@ type Config struct {
 	Keep         bool
 	Silent       bool
 	Workers      int
-	Engine       string // cpu|qsv|nvenc
+	Engine       string // cpu|qsv|nvenc|vaapi
+	VAAPIDevice  string // Hardware device path for VAAPI (e.g., /dev/dri/renderD128)
 	FFmpegPath   string
 	FFprobePath  string
 	Debug        bool
@@ -347,6 +348,7 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 
 	// build args with -progress pipe:1 and quiet errors
 	var args []string
+	var vaapiDriverName string // LIBVA_DRIVER_NAME for VAAPI
 	switch strings.ToLower(cfg.Engine) {
 	case "qsv":
 		args = []string{
@@ -389,6 +391,52 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 			"-c:a", "copy",
 			"-c:s", "copy",
 		)
+	case "vaapi", "hevc_vaapi":
+		// Validate and get device (uses default if not specified)
+		vaapiDevice, err := validateVAAPIDevice(cfg.VAAPIDevice)
+		if err != nil {
+			return err
+		}
+
+		// Update progress with device name
+		deviceName := filepath.Base(vaapiDevice)
+		prog.Update(workerID, func(r *Row) { r.Device = deviceName })
+
+		// Detect GPU vendor and get appropriate driver name
+		vendorID, err := detectGPUVendor(vaapiDevice)
+		if err != nil && cfg.Debug {
+			fmt.Fprintf(os.Stderr, "[worker %d] Warning: Could not detect GPU vendor: %v\n", workerID, err)
+		}
+
+		vaapiDriverName = getVAAPIDriverName(vendorID)
+		if cfg.Debug {
+			vendorName := getVendorName(vendorID)
+			if vaapiDriverName != "" {
+				fmt.Fprintf(os.Stderr, "[worker %d] VAAPI: Using %s GPU (%s) with driver %s on device %s\n",
+					workerID, vendorName, vendorID, vaapiDriverName, vaapiDevice)
+			} else {
+				fmt.Fprintf(os.Stderr, "[worker %d] VAAPI: Using %s GPU (%s) with auto-detected driver on device %s\n",
+					workerID, vendorName, vendorID, vaapiDevice)
+			}
+		}
+
+		args = []string{
+			"-hide_banner",
+			"-v", "error",
+			"-progress", "pipe:1",
+			"-vaapi_device", vaapiDevice,
+			"-i", jb.Src,
+			"-map", "0",
+			"-vf", "format=nv12,hwupload",
+			"-c:v", "hevc_vaapi",
+		}
+		args = append(args,
+			"-qp", strconv.Itoa(jb.Quality.CRF),
+		)
+		args = append(args,
+			"-c:a", "copy",
+			"-c:s", "copy",
+		)
 	default:
 		args = []string{
 			"-hide_banner",
@@ -416,7 +464,26 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 	}
 	args = append(args, jb.OutTarget)
 
+	// Print ffmpeg command when debug is enabled
+	if cfg.Debug {
+		cmdLine := cfg.FFmpegPath
+		for _, arg := range args {
+			// Quote arguments with spaces
+			if strings.Contains(arg, " ") {
+				cmdLine += " \"" + arg + "\""
+			} else {
+				cmdLine += " " + arg
+			}
+		}
+		fmt.Fprintf(os.Stderr, "[worker %d] ffmpeg command: %s\n", workerID, cmdLine)
+	}
+
 	cmd := exec.CommandContext(ctx, cfg.FFmpegPath, args...)
+
+	// Set LIBVA_DRIVER_NAME environment variable for VAAPI if needed
+	if vaapiDriverName != "" {
+		cmd.Env = append(os.Environ(), "LIBVA_DRIVER_NAME="+vaapiDriverName)
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -487,4 +554,84 @@ func findSibling(ffmpeg, name string) string {
 		return p
 	}
 	return ""
+}
+
+// validateVAAPIDevice checks if the specified VAAPI device exists and is accessible.
+// If device is empty, it returns the default device (/dev/dri/renderD128) if it exists.
+// Returns the device path to use and an error if validation fails.
+func validateVAAPIDevice(device string) (string, error) {
+	// If no device specified, use default
+	if device == "" {
+		device = "/dev/dri/renderD128"
+	}
+
+	// Check if device exists and is accessible
+	if _, err := os.Stat(device); err != nil {
+		if os.IsNotExist(err) {
+			// Try to list available devices for helpful error message
+			entries, _ := os.ReadDir("/dev/dri")
+			var available []string
+			for _, e := range entries {
+				name := e.Name()
+				if strings.HasPrefix(name, "renderD") {
+					available = append(available, "/dev/dri/"+name)
+				}
+			}
+			if len(available) > 0 {
+				return "", fmt.Errorf("VAAPI device %q not found; available devices: %s", device, strings.Join(available, ", "))
+			}
+			return "", fmt.Errorf("VAAPI device %q not found and no renderD devices found in /dev/dri", device)
+		}
+		return "", fmt.Errorf("VAAPI device %q not accessible: %w", device, err)
+	}
+
+	return device, nil
+}
+
+// detectGPUVendor reads the GPU vendor ID from sysfs for the given VAAPI device.
+// Returns the vendor ID (e.g., "0x8086" for Intel, "0x1002" for AMD) or an error.
+func detectGPUVendor(device string) (string, error) {
+	// Extract device name from path (e.g., "renderD128" from "/dev/dri/renderD128")
+	devName := filepath.Base(device)
+
+	// Read vendor ID from sysfs
+	vendorPath := filepath.Join("/sys/class/drm", devName, "device/vendor")
+	vendorBytes, err := os.ReadFile(vendorPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read GPU vendor from %s: %w", vendorPath, err)
+	}
+
+	// Trim whitespace and return
+	vendorID := strings.TrimSpace(string(vendorBytes))
+	return vendorID, nil
+}
+
+// getVAAPIDriverName returns the appropriate LIBVA_DRIVER_NAME for the given GPU vendor ID.
+// Returns empty string if vendor is unknown (system will auto-detect).
+func getVAAPIDriverName(vendorID string) string {
+	switch strings.ToLower(vendorID) {
+	case "0x8086":
+		// Intel: use iHD driver (modern driver for Gen 8+)
+		return "iHD"
+	case "0x1002":
+		// AMD: use radeonsi driver
+		return "radeonsi"
+	default:
+		// Unknown vendor, return empty to let system auto-detect
+		return ""
+	}
+}
+
+// getVendorName returns a human-readable name for the GPU vendor ID.
+func getVendorName(vendorID string) string {
+	switch strings.ToLower(vendorID) {
+	case "0x8086":
+		return "Intel"
+	case "0x1002":
+		return "AMD"
+	case "0x10de":
+		return "NVIDIA"
+	default:
+		return "Unknown"
+	}
 }

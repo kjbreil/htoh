@@ -72,6 +72,9 @@ func ValidateEngine(name, ffmpegPath string) error {
 	if name == "hevc_nvenc" {
 		name = "nvenc"
 	}
+	if name == "hevc_vaapi" {
+		name = "vaapi"
+	}
 	opts, err := EngineOptions(ffmpegPath)
 	if err != nil {
 		return err
@@ -91,6 +94,7 @@ func engineOptionsFromEncoders(encoders string) []EngineInfo {
 	var (
 		hasQSV   bool
 		hasNVENC bool
+		hasVAAPI bool
 	)
 	for _, line := range filterHEVCHardwareEncoders(encoders) {
 		lower := strings.ToLower(line)
@@ -100,12 +104,18 @@ func engineOptionsFromEncoders(encoders string) []EngineInfo {
 		if strings.Contains(lower, "hevc_nvenc") {
 			hasNVENC = true
 		}
+		if strings.Contains(lower, "hevc_vaapi") {
+			hasVAAPI = true
+		}
 	}
 	if hasQSV {
 		out = append(out, EngineInfo{Name: "qsv", Description: "Intel Quick Sync (hevc_qsv)"})
 	}
 	if hasNVENC {
 		out = append(out, EngineInfo{Name: "nvenc", Description: "NVIDIA NVENC (hevc_nvenc)"})
+	}
+	if hasVAAPI {
+		out = append(out, EngineInfo{Name: "vaapi", Description: "VA-API (hevc_vaapi)"})
 	}
 	return out
 }

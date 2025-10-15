@@ -17,7 +17,8 @@ var (
 	keep         = flag.Bool("k", false, "Keep intermediates (reserved)")
 	silent       = flag.Bool("S", false, "Silent (less console output)")
 	workers      = flag.Int("j", 1, "Parallel workers")
-	engine       = flag.String("engine", "cpu", "Engine: cpu|qsv|nvenc")
+	engine       = flag.String("engine", "cpu", "Engine: cpu|qsv|nvenc|vaapi")
+	device       = flag.String("device", "", "Hardware device path for VAAPI (default: /dev/dri/renderD128)")
 	ffmpegPath   = flag.String("ffmpeg", "ffmpeg", "Path to ffmpeg binary")
 	ffprobePath  = flag.String("ffprobe", "", "Path to ffprobe binary (defaults to sibling of -ffmpeg or system ffprobe)")
 	debugLogging = flag.Bool("debug", false, "Enable verbose logging (file discovery, ffprobe calls)")
@@ -70,6 +71,7 @@ func main() {
 		Silent:       *silent,
 		Workers:      *workers,
 		Engine:       *engine,
+		VAAPIDevice:  *device,
 		FFmpegPath:   *ffmpegPath,
 		FFprobePath:  *ffprobePath,
 		Debug:        *debugLogging,

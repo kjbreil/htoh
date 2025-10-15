@@ -22,6 +22,7 @@ type Row struct {
 	Speed     string  // e.g. "2.38x"
 	OutTimeS  float64 // seconds encoded
 	SizeBytes int64
+	Device    string // VAAPI device path (e.g., "renderD128")
 	Err       string
 }
 
@@ -83,29 +84,60 @@ func (p *Prog) renderOnce() {
 	}
 	sort.Ints(ids)
 
+	// Check if any worker is using a device (VAAPI mode)
+	hasDevice := false
+	for _, r := range p.rows {
+		if r.Device != "" {
+			hasDevice = true
+			break
+		}
+	}
+
 	// Header
 	fmt.Println("Workers live status (updates ~3/sec)")
-	fmt.Println(strings.Repeat("─", 90))
-	fmt.Printf("%-6s  %-10s  %-38s  %7s  %6s  %8s  %8s\n",
-		"WID", "PHASE", "FILE", "FPS", "SPEED", "TIME", "SIZE")
-	fmt.Println(strings.Repeat("─", 90))
+	if hasDevice {
+		fmt.Println(strings.Repeat("─", 105))
+		fmt.Printf("%-6s  %-10s  %-28s  %7s  %6s  %8s  %8s  %-12s\n",
+			"WID", "PHASE", "FILE", "FPS", "SPEED", "TIME", "SIZE", "DEVICE")
+		fmt.Println(strings.Repeat("─", 105))
+	} else {
+		fmt.Println(strings.Repeat("─", 90))
+		fmt.Printf("%-6s  %-10s  %-38s  %7s  %6s  %8s  %8s\n",
+			"WID", "PHASE", "FILE", "FPS", "SPEED", "TIME", "SIZE")
+		fmt.Println(strings.Repeat("─", 90))
+	}
 
 	// Rows
 	for _, id := range ids {
 		r := p.rows[id]
 		file := r.FileBase
-		if len(file) > 38 {
-			file = file[:35] + "..."
+		maxFileLen := 38
+		if hasDevice {
+			maxFileLen = 28
+		}
+		if len(file) > maxFileLen {
+			file = file[:maxFileLen-3] + "..."
 		}
 		times := fmt.Sprintf("%6.1fs", r.OutTimeS)
 		size := humanBytes(r.SizeBytes)
 		if r.Phase == "failed" && r.Err != "" {
 			file = file + "  ✖ " + r.Err
 		}
-		fmt.Printf("%-6d  %-10s  %-38s  %7.2f  %6s  %8s  %8s\n",
-			r.WorkerID, r.Phase, file, r.FPS, r.Speed, times, size)
+
+		if hasDevice {
+			fmt.Printf("%-6d  %-10s  %-28s  %7.2f  %6s  %8s  %8s  %-12s\n",
+				r.WorkerID, r.Phase, file, r.FPS, r.Speed, times, size, r.Device)
+		} else {
+			fmt.Printf("%-6d  %-10s  %-38s  %7.2f  %6s  %8s  %8s\n",
+				r.WorkerID, r.Phase, file, r.FPS, r.Speed, times, size)
+		}
 	}
-	fmt.Println(strings.Repeat("─", 90))
+
+	if hasDevice {
+		fmt.Println(strings.Repeat("─", 105))
+	} else {
+		fmt.Println(strings.Repeat("─", 90))
+	}
 	fmt.Println("Hints: -S to hide non-table logs | Ctrl+C stops after current tick")
 }
 
