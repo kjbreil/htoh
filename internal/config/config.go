@@ -3,10 +3,68 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
-	"github.com/kjbreil/opti/internal/runner"
 )
+
+// Config represents the runtime configuration for the opti application.
+type Config struct {
+	SourceDirs   []string
+	WorkDir      string
+	Interactive  bool
+	Keep         bool
+	Silent       bool
+	Workers      int
+	ScanInterval int    // minutes between scans, 0 = scan once and exit
+	Engine       string // cpu|qsv|nvenc|vaapi
+	VAAPIDevice  string // Hardware device path for VAAPI (e.g., /dev/dri/renderD128)
+	FFmpegPath   string
+	FFprobePath  string
+	Debug        bool
+	ForceMP4     bool
+	FaststartMP4 bool
+	FastMode     bool
+}
+
+// NormalizeConfig sets default values for config fields that may be empty.
+func NormalizeConfig(cfg *Config) {
+	// Set default ffmpeg path if not provided
+	ffmpegPath := strings.TrimSpace(cfg.FFmpegPath)
+	if ffmpegPath == "" {
+		ffmpegPath = "ffmpeg"
+	}
+	cfg.FFmpegPath = ffmpegPath
+
+	// Set default ffprobe path if not provided
+	ffprobePath := strings.TrimSpace(cfg.FFprobePath)
+	if ffprobePath == "" {
+		ffprobePath = "ffprobe"
+		if p := findSibling(cfg.FFmpegPath, "ffprobe"); p != "" {
+			ffprobePath = p
+		}
+	}
+	cfg.FFprobePath = ffprobePath
+
+	if cfg.Debug {
+		fmt.Printf("Using ffmpeg: %s\n", cfg.FFmpegPath)
+		fmt.Printf("Using ffprobe: %s\n", cfg.FFprobePath)
+	}
+}
+
+// findSibling returns the path to a sibling binary in the same directory as the given binary.
+func findSibling(ffmpeg, name string) string {
+	if ffmpeg == "" {
+		return ""
+	}
+	dir := filepath.Dir(ffmpeg)
+	p := filepath.Join(dir, name)
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return ""
+}
 
 // TomlConfig represents the TOML configuration file structure.
 // All fields use snake_case TOML tags to match common configuration conventions.
@@ -30,9 +88,9 @@ type TomlConfig struct {
 }
 
 // LoadFromFile reads and parses a TOML configuration file.
-// It returns a runner.Config populated with values from the file.
+// It returns a Config populated with values from the file.
 // Returns an error if the file cannot be read or parsed.
-func LoadFromFile(path string) (*runner.Config, error) {
+func LoadFromFile(path string) (*Config, error) {
 	// Check if file exists
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
@@ -52,8 +110,8 @@ func LoadFromFile(path string) (*runner.Config, error) {
 	sourceDirs = append(sourceDirs, tomlCfg.SourceDir...)
 	sourceDirs = append(sourceDirs, tomlCfg.SourceDirs...)
 
-	// Convert to runner.Config
-	cfg := &runner.Config{
+	// Convert to Config
+	cfg := &Config{
 		SourceDirs:   sourceDirs,
 		WorkDir:      tomlCfg.WorkDir,
 		Interactive:  tomlCfg.Interactive,
@@ -232,7 +290,7 @@ func GenerateDefault(path string) error {
 // MergeConfigs merges a config file with CLI flags.
 // CLI flags take precedence over config file values.
 // Only explicitly set CLI flag values (non-default) override config file values.
-func MergeConfigs(configFile, cliFlags *runner.Config) *runner.Config {
+func MergeConfigs(configFile, cliFlags *Config) *Config {
 	// Start with config file values
 	merged := *configFile
 

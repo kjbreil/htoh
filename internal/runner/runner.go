@@ -6,41 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-	"time"
 
-	"gorm.io/gorm"
+	"github.com/kjbreil/opti/internal/config"
+	"github.com/kjbreil/opti/internal/progress"
 )
 
 const (
-	containerMP4 = "mp4"
+	ContainerMP4 = "mp4"
 )
 
-type Config struct {
-	SourceDirs   []string
-	WorkDir      string
-	Interactive  bool
-	Keep         bool
-	Silent       bool
-	Workers      int
-	ScanInterval int    // minutes between scans, 0 = scan once and exit
-	Engine       string // cpu|qsv|nvenc|vaapi
-	VAAPIDevice  string // Hardware device path for VAAPI (e.g., /dev/dri/renderD128)
-	FFmpegPath   string
-	FFprobePath  string
-	Debug        bool
-	ForceMP4     bool
-	FaststartMP4 bool
-	FastMode     bool
-}
-
-type qualityChoice struct {
+type QualityChoice struct {
 	CRF           int
 	ICQ           int
 	CQ            int
@@ -48,327 +28,17 @@ type qualityChoice struct {
 	BitsPerPixel  float64
 }
 
-type job struct {
+type Job struct {
 	Src       string
 	Rel       string
 	Probe     *ProbeInfo
 	OutTarget string
 	Container string
 	Faststart bool
-	Quality   qualityChoice
+	Quality   QualityChoice
 }
 
-// NormalizeConfig sets default values for config fields that may be empty.
-func NormalizeConfig(cfg *Config) {
-	// Set default ffmpeg path if not provided
-	ffmpegPath := strings.TrimSpace(cfg.FFmpegPath)
-	if ffmpegPath == "" {
-		ffmpegPath = "ffmpeg"
-	}
-	cfg.FFmpegPath = ffmpegPath
-
-	// Set default ffprobe path if not provided
-	ffprobePath := strings.TrimSpace(cfg.FFprobePath)
-	if ffprobePath == "" {
-		ffprobePath = "ffprobe"
-		if p := findSibling(cfg.FFmpegPath, "ffprobe"); p != "" {
-			ffprobePath = p
-		}
-	}
-	cfg.FFprobePath = ffprobePath
-
-	if cfg.Debug {
-		fmt.Printf("Using ffmpeg: %s\n", cfg.FFmpegPath)
-		fmt.Printf("Using ffprobe: %s\n", cfg.FFprobePath)
-	}
-}
-
-func Run(ctx context.Context, cfg Config) error {
-	if cfg.Workers <= 0 {
-		cfg.Workers = runtime.NumCPU()
-	}
-
-	// Normalize config paths
-	NormalizeConfig(&cfg)
-
-	// Initialize database
-	db, err := InitDB(cfg.WorkDir, cfg.Debug)
-	if err != nil {
-		return fmt.Errorf("init database: %w", err)
-	}
-	if !cfg.Silent {
-		fmt.Println("Database initialized.")
-	}
-
-	// Continuous scanning loop
-	for {
-		// Scan directories
-		if !cfg.Silent {
-			if len(cfg.SourceDirs) == 1 {
-				fmt.Println("Scanning directory...")
-			} else {
-				fmt.Printf("Scanning %d directories...\n", len(cfg.SourceDirs))
-			}
-		}
-
-		// Aggregate candidates from all source directories
-		var allFiles []candidate
-		for _, sourceDir := range cfg.SourceDirs {
-			var files []candidate
-			files, err = listCandidates(ctx, cfg.FFprobePath, sourceDir, db, cfg.Debug)
-			if err != nil {
-				return err
-			}
-			allFiles = append(allFiles, files...)
-		}
-
-		if !cfg.Silent {
-			fmt.Printf("Found %d video file(s). Database updated.\n", len(allFiles))
-		}
-
-		// Check if we should scan continuously or exit
-		if cfg.ScanInterval == 0 {
-			if !cfg.Silent {
-				fmt.Println("Single scan complete. Exiting.")
-			}
-			break
-		}
-
-		// Wait for next scan
-		if !cfg.Silent {
-			fmt.Printf("Waiting %d minute(s) before next scan...\n", cfg.ScanInterval)
-		}
-
-		select {
-		case <-ctx.Done():
-			if !cfg.Silent {
-				fmt.Println("\nShutdown requested. Exiting.")
-			}
-			return fmt.Errorf("context cancelled during scan interval: %w", ctx.Err())
-		case <-time.After(time.Duration(cfg.ScanInterval) * time.Minute):
-			// Continue to next scan
-		}
-	}
-
-	return nil
-}
-
-type candidate struct {
-	path string
-	info *ProbeInfo
-}
-
-func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, debug bool) ([]candidate, error) {
-	var out []candidate
-	if debug {
-		fmt.Printf("[scan] Walking %s\n", root)
-	}
-
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-
-		// Check file extension
-		ext := strings.ToLower(filepath.Ext(d.Name()))
-		switch ext {
-		case ".mkv", ".mp4", ".mov", ".m4v":
-		default:
-			return nil
-		}
-
-		// Get file info
-		fileInfo, err := os.Stat(p)
-		if err != nil {
-			if debug {
-				fmt.Printf("[scan] stat error for %s: %v\n", p, err)
-			}
-			return nil
-		}
-
-		// Check database for existing file
-		existingFile, err := GetFileByPath(db, p)
-		needsProbe := false
-
-		switch {
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			// New file
-			needsProbe = true
-			if debug {
-				fmt.Printf("[scan] new file: %s\n", p)
-			}
-		case err != nil:
-			if debug {
-				fmt.Printf("[scan] db error for %s: %v\n", p, err)
-			}
-			return nil
-		default:
-			// File exists in DB, check if changed
-			if existingFile.Size != fileInfo.Size() || !existingFile.ModTime.Equal(fileInfo.ModTime()) {
-				needsProbe = true
-				if debug {
-					fmt.Printf("[scan] file changed: %s\n", p)
-				}
-			} else if debug {
-				fmt.Printf("[scan] file unchanged (cached): %s\n", p)
-			}
-		}
-
-		var probeInfo *ProbeInfoDetailed
-		if needsProbe {
-			// Probe the file
-			ctx2, cancel := context.WithTimeout(ctx, 60*time.Second)
-			defer cancel()
-
-			if debug {
-				fmt.Printf("[scan] probing %s\n", p)
-			}
-
-			var pi *ProbeInfoDetailed
-			pi, err = probe(ctx2, ffprobePath, p)
-			if err != nil {
-				if debug {
-					fmt.Printf("[scan] ffprobe error for %s: %v\n", p, err)
-				}
-				// Store file with failed status
-				file := &File{
-					Path:    p,
-					Name:    filepath.Base(p),
-					Size:    fileInfo.Size(),
-					ModTime: fileInfo.ModTime(),
-					Status:  "failed",
-				}
-				_ = CreateOrUpdateFile(db, file)
-				return nil
-			}
-
-			probeInfo = pi
-
-			// Update database with file info
-			file := &File{
-				Path:    p,
-				Name:    filepath.Base(p),
-				Size:    fileInfo.Size(),
-				ModTime: fileInfo.ModTime(),
-				Status:  "discovered",
-			}
-			var createErr error
-			if createErr = CreateOrUpdateFile(db, file); createErr != nil {
-				if debug {
-					fmt.Printf("[scan] db file update error for %s: %v\n", p, createErr)
-				}
-				return nil
-			}
-
-			// Get the file ID (it was set by CreateOrUpdateFile)
-			existingFile, _ = GetFileByPath(db, p)
-
-			// Update database with media info
-			mediaInfo := &MediaInfo{
-				FileID:         existingFile.ID,
-				Duration:       probeInfo.Duration,
-				FormatBitrate:  probeInfo.FormatBitrate,
-				Container:      probeInfo.Container,
-				VideoCodec:     probeInfo.VideoCodec,
-				VideoProfile:   probeInfo.VideoProfile,
-				Width:          probeInfo.Width,
-				Height:         probeInfo.Height,
-				CodedWidth:     probeInfo.CodedWidth,
-				CodedHeight:    probeInfo.CodedHeight,
-				FPS:            probeInfo.FPS,
-				AspectRatio:    probeInfo.AspectRatio,
-				VideoBitrate:   probeInfo.VideoBitrate,
-				PixelFormat:    probeInfo.PixelFormat,
-				BitDepth:       probeInfo.BitDepth,
-				ChromaLocation: probeInfo.ChromaLocation,
-				ColorSpace:     probeInfo.ColorSpace,
-				ColorRange:     probeInfo.ColorRange,
-				ColorPrimaries: probeInfo.ColorPrimaries,
-			}
-			var mediaErr error
-			if mediaErr = CreateOrUpdateMediaInfo(db, mediaInfo); mediaErr != nil {
-				if debug {
-					fmt.Printf("[scan] db media info update error for %s: %v\n", p, mediaErr)
-				}
-			}
-		}
-
-		// Check if file is eligible for conversion and add to candidate list
-		if needsProbe && probeInfo != nil {
-			// Get MediaInfo for eligibility check
-			var mediaInfo *MediaInfo
-			mediaInfo, err = GetMediaInfoByFileID(db, existingFile.ID)
-			if err == nil {
-				// Check if file is eligible for conversion
-				if IsEligibleForConversion(mediaInfo) {
-					// If file was previously marked as done or failed, reset to discovered
-					// This allows re-transcoding when files are replaced or settings change
-					if existingFile.Status == "done" || existingFile.Status == "failed" {
-						existingFile.Status = "discovered"
-						if updateErr := CreateOrUpdateFile(db, existingFile); updateErr != nil && debug {
-							fmt.Printf("[scan] failed to reset status for %s: %v\n", p, updateErr)
-						} else if debug {
-							fmt.Printf("[scan] reset status to discovered for %s (was: done/failed, now eligible)\n", p)
-						}
-					}
-
-					// Convert to old ProbeInfo format for candidate struct
-					oldProbeInfo := &ProbeInfo{
-						VideoCodec: probeInfo.VideoCodec,
-						Width:      probeInfo.Width,
-						Height:     probeInfo.Height,
-						FPS:        probeInfo.FPS,
-						BitRate:    probeInfo.VideoBitrate,
-					}
-					out = append(out, candidate{path: p, info: oldProbeInfo})
-					if debug {
-						fmt.Printf("[scan] queued candidate %s (codec=%s)\n", p, probeInfo.VideoCodec)
-					}
-				}
-			}
-		} else if !needsProbe && existingFile != nil {
-			// Use cached data
-			var mediaInfo *MediaInfo
-			mediaInfo, err = GetMediaInfoByFileID(db, existingFile.ID)
-			if err == nil {
-				// Check if file is eligible for conversion
-				if IsEligibleForConversion(mediaInfo) {
-					// If file was previously marked as done or failed, reset to discovered
-					if existingFile.Status == "done" || existingFile.Status == "failed" {
-						existingFile.Status = "discovered"
-						if updateErr := CreateOrUpdateFile(db, existingFile); updateErr != nil && debug {
-							fmt.Printf("[scan] failed to reset status for %s: %v\n", p, updateErr)
-						} else if debug {
-							fmt.Printf("[scan] reset status to discovered for %s (was: done/failed, now eligible)\n", p)
-						}
-					}
-
-					// Convert to old ProbeInfo format for candidate struct
-					oldProbeInfo := &ProbeInfo{
-						VideoCodec: mediaInfo.VideoCodec,
-						Width:      mediaInfo.Width,
-						Height:     mediaInfo.Height,
-						FPS:        mediaInfo.FPS,
-						BitRate:    mediaInfo.VideoBitrate,
-					}
-					out = append(out, candidate{path: p, info: oldProbeInfo})
-				}
-			}
-		}
-
-		return nil
-	})
-	if err != nil {
-		return out, fmt.Errorf("failed to walk directory %s: %w", root, err)
-	}
-
-	return out, nil
-}
-
-func deriveQualityChoice(info *ProbeInfo, fast bool) qualityChoice {
+func DeriveQualityChoice(info *ProbeInfo, fast bool) QualityChoice {
 	base := 22
 	var bpp float64
 	var bitrate int64
@@ -382,7 +52,7 @@ func deriveQualityChoice(info *ProbeInfo, fast bool) qualityChoice {
 	crf := clampRange(base, 16, 35)
 	icq := clampRange(base-1, 1, 51)
 	cq := clampRange(base-1, 0, 51)
-	return qualityChoice{
+	return QualityChoice{
 		CRF:           crf,
 		ICQ:           icq,
 		CQ:            cq,
@@ -452,7 +122,7 @@ func clampRange(val, minVal, maxVal int) int {
 	return val
 }
 
-func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog, logFunc func(string)) error {
+func Transcode(ctx context.Context, cfg config.Config, jb Job, workerID int, prog *progress.Prog, logFunc func(string)) error {
 	if err := os.MkdirAll(cfg.WorkDir, 0o750); err != nil {
 		return fmt.Errorf("failed to create work directory %s: %w", cfg.WorkDir, err)
 	}
@@ -511,7 +181,7 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 
 		// Update progress with device name
 		deviceName := filepath.Base(vaapiDevice)
-		prog.Update(workerID, func(r *Row) { r.Device = deviceName })
+		prog.Update(workerID, func(r *progress.Row) { r.Device = deviceName })
 
 		// Detect GPU vendor and get appropriate driver name
 		vendorID, err := detectGPUVendor(vaapiDevice)
@@ -599,11 +269,11 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 		)
 	}
 
-	if jb.Container == containerMP4 {
+	if jb.Container == ContainerMP4 {
 		if jb.Faststart {
 			args = append(args, "-movflags", "+faststart")
 		}
-		args = append(args, "-f", containerMP4)
+		args = append(args, "-f", ContainerMP4)
 	}
 	args = append(args, jb.OutTarget)
 
@@ -666,15 +336,15 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 				switch key {
 				case "out_time_ms":
 					ms, _ := strconv.ParseFloat(val, 64)
-					prog.Update(workerID, func(r *Row) { r.OutTimeS = ms / 1000000.0 })
+					prog.Update(workerID, func(r *progress.Row) { r.OutTimeS = ms / 1000000.0 })
 				case "fps":
 					fps, _ := strconv.ParseFloat(val, 64)
-					prog.Update(workerID, func(r *Row) { r.FPS = fps })
+					prog.Update(workerID, func(r *progress.Row) { r.FPS = fps })
 				case "speed":
-					prog.Update(workerID, func(r *Row) { r.Speed = val })
+					prog.Update(workerID, func(r *progress.Row) { r.Speed = val })
 				case "total_size":
 					sb, _ := strconv.ParseInt(val, 10, 64)
-					prog.Update(workerID, func(r *Row) { r.SizeBytes = sb })
+					prog.Update(workerID, func(r *progress.Row) { r.SizeBytes = sb })
 				case "progress":
 					// When val == "end", ffmpeg will exit shortly; no action needed
 				}

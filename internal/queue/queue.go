@@ -1,4 +1,4 @@
-package runner
+package queue
 
 import (
 	"context"
@@ -9,6 +9,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kjbreil/opti/internal/config"
+	"github.com/kjbreil/opti/internal/database"
+	"github.com/kjbreil/opti/internal/progress"
+	"github.com/kjbreil/opti/internal/runner"
 	"gorm.io/gorm"
 )
 
@@ -28,7 +32,7 @@ type LogBroadcaster interface {
 // QueueProcessor manages the transcoding queue.
 type QueueProcessor struct {
 	db              *gorm.DB
-	cfg             Config
+	cfg             config.Config
 	mu              sync.RWMutex
 	active          map[uint]bool // track active queue items
 	broadcaster     LogBroadcaster
@@ -36,7 +40,7 @@ type QueueProcessor struct {
 }
 
 // NewQueueProcessor creates a new queue processor.
-func NewQueueProcessor(db *gorm.DB, cfg Config) *QueueProcessor {
+func NewQueueProcessor(db *gorm.DB, cfg config.Config) *QueueProcessor {
 	return &QueueProcessor{
 		db:     db,
 		cfg:    cfg,
@@ -64,7 +68,7 @@ func (qp *QueueProcessor) broadcastHTML(queueItemID uint) {
 // logAndBroadcast creates a task log and broadcasts it via SSE.
 func (qp *QueueProcessor) logAndBroadcast(queueItemID, fileID uint, logLevel, message string) {
 	// Create log in database
-	if err := CreateTaskLog(qp.db, queueItemID, fileID, logLevel, message); err != nil {
+	if err := database.CreateTaskLog(qp.db, queueItemID, fileID, logLevel, message); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create task log: %v\n", err)
 	}
 
@@ -77,7 +81,7 @@ func (qp *QueueProcessor) logAndBroadcast(queueItemID, fileID uint, logLevel, me
 // Start begins processing the queue.
 func (qp *QueueProcessor) Start(ctx context.Context) error {
 	// Create a worker pool
-	jobs := make(chan *QueueItem, qp.cfg.Workers*2)
+	jobs := make(chan *database.QueueItem, qp.cfg.Workers*2)
 	var wg sync.WaitGroup
 
 	// Start workers
@@ -111,9 +115,9 @@ func (qp *QueueProcessor) Start(ctx context.Context) error {
 }
 
 // feedQueue feeds items from the database into the job channel.
-func (qp *QueueProcessor) feedQueue(jobs chan<- *QueueItem) {
+func (qp *QueueProcessor) feedQueue(jobs chan<- *database.QueueItem) {
 	// Get next queued item
-	item, err := GetNextQueueItem(qp.db)
+	item, err := database.GetNextQueueItem(qp.db)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		// No items in queue
 		return
@@ -147,7 +151,7 @@ func (qp *QueueProcessor) feedQueue(jobs chan<- *QueueItem) {
 }
 
 // worker processes jobs from the queue.
-func (qp *QueueProcessor) worker(ctx context.Context, workerID int, jobs <-chan *QueueItem) {
+func (qp *QueueProcessor) worker(ctx context.Context, workerID int, jobs <-chan *database.QueueItem) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -162,7 +166,7 @@ func (qp *QueueProcessor) worker(ctx context.Context, workerID int, jobs <-chan 
 }
 
 // processItem processes a single queue item.
-func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *QueueItem) {
+func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *database.QueueItem) {
 	defer func() {
 		qp.mu.Lock()
 		delete(qp.active, item.ID)
@@ -170,7 +174,7 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 	}()
 
 	// Update status to processing
-	if err := UpdateQueueItemStatus(qp.db, item.ID, "processing", ""); err != nil {
+	if err := database.UpdateQueueItemStatus(qp.db, item.ID, "processing", ""); err != nil {
 		fmt.Fprintf(os.Stderr, "[worker %d] Failed to update queue item status: %v\n", workerID, err)
 		return
 	}
@@ -185,12 +189,12 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 
 	// Get media info for the file
 	qp.logAndBroadcast(item.ID, item.FileID, "info", "Retrieving media information...")
-	mediaInfo, err := GetMediaInfoByFileID(qp.db, item.FileID)
+	mediaInfo, err := database.GetMediaInfoByFileID(qp.db, item.FileID)
 	if err != nil {
 		errMsg := fmt.Sprintf("failed to get media info: %v", err)
 		qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
 		var updateErr error
-		if updateErr = UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg); updateErr != nil {
+		if updateErr = database.UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg); updateErr != nil {
 			fmt.Fprintf(os.Stderr, "[worker %d] Failed to update queue item status: %v\n", workerID, updateErr)
 		}
 		qp.broadcastHTML(item.ID)
@@ -206,11 +210,11 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 	)
 
 	// Check if file is eligible for conversion
-	if !IsEligibleForConversion(mediaInfo) {
+	if !database.IsEligibleForConversion(mediaInfo) {
 		errMsg := fmt.Sprintf("file is not eligible for conversion (codec: %s)", mediaInfo.VideoCodec)
 		qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
 		var updateErr error
-		if updateErr = UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg); updateErr != nil {
+		if updateErr = database.UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg); updateErr != nil {
 			fmt.Fprintf(os.Stderr, "[worker %d] Failed to update queue item status: %v\n", workerID, updateErr)
 		}
 		qp.broadcastHTML(item.ID)
@@ -218,7 +222,7 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 	}
 
 	// Build ProbeInfo for quality estimation
-	probeInfo := &ProbeInfo{
+	probeInfo := &runner.ProbeInfo{
 		VideoCodec: mediaInfo.VideoCodec,
 		Width:      mediaInfo.Width,
 		Height:     mediaInfo.Height,
@@ -227,16 +231,16 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 	}
 
 	// Determine quality and output container
-	quality := deriveQualityChoice(probeInfo, qp.cfg.FastMode)
+	quality := runner.DeriveQualityChoice(probeInfo, qp.cfg.FastMode)
 	qp.logAndBroadcast(item.ID, item.FileID, "info", fmt.Sprintf("Quality settings determined: %v", quality))
 
 	container := "mkv"
 	faststart := false
 	if qp.cfg.ForceMP4 {
-		container = containerMP4
+		container = runner.ContainerMP4
 		faststart = true
-	} else if qp.cfg.FaststartMP4 && mediaInfo.Container == containerMP4 {
-		container = containerMP4
+	} else if qp.cfg.FaststartMP4 && mediaInfo.Container == runner.ContainerMP4 {
+		container = runner.ContainerMP4
 		faststart = true
 	}
 
@@ -255,7 +259,7 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 	qp.logAndBroadcast(item.ID, item.FileID, "info", fmt.Sprintf("Output path: %s", outTarget))
 
 	// Create job
-	job := job{
+	job := runner.Job{
 		Src:       item.File.Path,
 		Probe:     probeInfo,
 		OutTarget: outTarget,
@@ -265,7 +269,7 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 	}
 
 	// Create a simple progress tracker (no live dashboard for queue mode)
-	prog := NewProg()
+	prog := progress.NewProg()
 
 	// Start progress broadcasting goroutine
 	progressCtx, cancelProgress := context.WithCancel(ctx)
@@ -302,20 +306,20 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 	// Transcode
 	qp.logAndBroadcast(item.ID, item.FileID, "info", "Starting transcoding...")
 	var transcodeErr error
-	if transcodeErr = transcode(ctx, qp.cfg, job, workerID, prog, func(msg string) {
+	if transcodeErr = runner.Transcode(ctx, qp.cfg, job, workerID, prog, func(msg string) {
 		qp.logAndBroadcast(item.ID, item.FileID, "info", msg)
 	}); transcodeErr != nil {
 		errMsg := fmt.Sprintf("transcoding failed: %v", transcodeErr)
 		qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
 		var updateErr error
-		if updateErr = UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg); updateErr != nil {
+		if updateErr = database.UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg); updateErr != nil {
 			fmt.Fprintf(os.Stderr, "[worker %d] Failed to update queue item status: %v\n", workerID, updateErr)
 		}
 		qp.broadcastHTML(item.ID)
 
 		// Update file status
 		var fileErr error
-		if fileErr = qp.db.Model(&File{}).Where("id = ?", item.FileID).Update("status", "failed").Error; fileErr != nil {
+		if fileErr = qp.db.Model(&database.File{}).Where("id = ?", item.FileID).Update("status", "failed").Error; fileErr != nil {
 			fmt.Fprintf(os.Stderr, "[worker %d] Failed to update file status: %v\n", workerID, fileErr)
 		}
 		return
@@ -325,7 +329,7 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 
 	// Mark as done
 	var doneErr error
-	if doneErr = UpdateQueueItemStatus(qp.db, item.ID, "done", ""); doneErr != nil {
+	if doneErr = database.UpdateQueueItemStatus(qp.db, item.ID, "done", ""); doneErr != nil {
 		fmt.Fprintf(os.Stderr, "[worker %d] Failed to mark queue item as done: %v\n", workerID, doneErr)
 		return
 	}
@@ -333,7 +337,7 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 
 	// Update file status
 	var statusErr error
-	if statusErr = qp.db.Model(&File{}).Where("id = ?", item.FileID).Update("status", "done").Error; statusErr != nil {
+	if statusErr = qp.db.Model(&database.File{}).Where("id = ?", item.FileID).Update("status", "done").Error; statusErr != nil {
 		fmt.Fprintf(os.Stderr, "[worker %d] Failed to update file status: %v\n", workerID, statusErr)
 	}
 
@@ -348,7 +352,7 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 // Returns the queue item ID.
 func (qp *QueueProcessor) AddFileToQueue(filePath string) (uint, error) {
 	// Get file from database
-	file, err := GetFileByPath(qp.db, filePath)
+	file, err := database.GetFileByPath(qp.db, filePath)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return 0, fmt.Errorf("file not found in database: %s", filePath)
 	}
@@ -357,18 +361,18 @@ func (qp *QueueProcessor) AddFileToQueue(filePath string) (uint, error) {
 	}
 
 	// Get media info and check eligibility
-	mediaInfo, err := GetMediaInfoByFileID(qp.db, file.ID)
+	mediaInfo, err := database.GetMediaInfoByFileID(qp.db, file.ID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get media info: %w", err)
 	}
 
 	// Check if file is eligible for conversion
-	if !IsEligibleForConversion(mediaInfo) {
+	if !database.IsEligibleForConversion(mediaInfo) {
 		return 0, fmt.Errorf("file is not eligible for conversion (codec: %s)", mediaInfo.VideoCodec)
 	}
 
 	// Add to queue
-	return AddToQueue(qp.db, file.ID, 0)
+	return database.AddToQueue(qp.db, file.ID, 0)
 }
 
 // AddFolderToQueue adds all eligible files in a folder to the queue.
@@ -376,26 +380,26 @@ func (qp *QueueProcessor) AddFolderToQueue(folderPath string) (int, error) {
 	count := 0
 
 	// Get all files in the folder from database
-	var files []File
+	var files []database.File
 	if err := qp.db.Where("path LIKE ?", folderPath+"%").Find(&files).Error; err != nil {
 		return 0, fmt.Errorf("failed to query files: %w", err)
 	}
 
 	for _, file := range files {
 		// Get media info and check eligibility
-		mediaInfo, err := GetMediaInfoByFileID(qp.db, file.ID)
+		mediaInfo, err := database.GetMediaInfoByFileID(qp.db, file.ID)
 		if err != nil {
 			continue
 		}
 
 		// Check if file is eligible for conversion
-		if !IsEligibleForConversion(mediaInfo) {
+		if !database.IsEligibleForConversion(mediaInfo) {
 			continue
 		}
 
 		// Add to queue
 		var addErr error
-		if _, addErr = AddToQueue(qp.db, file.ID, 0); addErr == nil {
+		if _, addErr = database.AddToQueue(qp.db, file.ID, 0); addErr == nil {
 			count++
 		}
 	}

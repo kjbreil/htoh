@@ -90,7 +90,7 @@ func fpsFromFrac(fr string) float64 {
 	return n / d
 }
 
-func probe(ctx context.Context, ffprobePath, file string) (*ProbeInfoDetailed, error) {
+func Probe(ctx context.Context, ffprobePath, file string) (*ProbeInfoDetailed, error) {
 	args := []string{
 		"-v", "error",
 		"-print_format", "json",

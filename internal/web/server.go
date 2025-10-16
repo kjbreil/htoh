@@ -13,21 +13,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kjbreil/opti/internal/runner"
+	"github.com/kjbreil/opti/internal/config"
+	"github.com/kjbreil/opti/internal/database"
+	"github.com/kjbreil/opti/internal/queue"
 	"gorm.io/gorm"
 )
 
 // Server represents the web server.
 type Server struct {
 	db          *gorm.DB
-	cfg         runner.Config
+	cfg         config.Config
 	broadcaster *EventBroadcaster
-	queueProc   *runner.QueueProcessor
+	queueProc   *queue.QueueProcessor
 	templates   *template.Template
 }
 
 // NewServer creates a new web server.
-func NewServer(db *gorm.DB, cfg runner.Config, queueProc *runner.QueueProcessor) (*Server, error) {
+func NewServer(db *gorm.DB, cfg config.Config, queueProc *queue.QueueProcessor) (*Server, error) {
 	broadcaster := NewEventBroadcaster()
 
 	// Set broadcaster on queue processor for real-time log events
@@ -64,7 +66,7 @@ func NewServer(db *gorm.DB, cfg runner.Config, queueProc *runner.QueueProcessor)
 
 	// Set HTML broadcaster for queue item status updates
 	queueProc.SetHTMLBroadcaster(func(queueItemID uint) {
-		var item runner.QueueItem
+		var item database.QueueItem
 		var loadErr error
 		if loadErr = db.Preload("File").First(&item, queueItemID).Error; loadErr != nil {
 			fmt.Fprintf(os.Stderr, "Failed to load queue item for HTML render: %v\n", loadErr)
@@ -223,15 +225,15 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 
 	if !info.IsDir() {
 		// Single file
-		var file *runner.File
-		file, err = runner.GetFileByPath(s.db, rootPath)
+		var file *database.File
+		file, err = database.GetFileByPath(s.db, rootPath)
 		if err == nil {
 			root.FileID = file.ID
 			root.Size = file.Size
 			root.Status = file.Status
 
-			var mediaInfo *runner.MediaInfo
-			mediaInfo, err = runner.GetMediaInfoByFileID(s.db, file.ID)
+			var mediaInfo *database.MediaInfo
+			mediaInfo, err = database.GetMediaInfoByFileID(s.db, file.ID)
 			if err == nil {
 				root.Codec = mediaInfo.VideoCodec
 			}
@@ -240,14 +242,14 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 	}
 
 	// Directory - get all files from database
-	var files []runner.File
+	var files []database.File
 	var dbErr error
 	if dbErr = s.db.Where("path LIKE ?", rootPath+"%").Find(&files).Error; dbErr != nil {
 		return nil, dbErr
 	}
 
 	// Build file map
-	fileMap := make(map[string]*runner.File)
+	fileMap := make(map[string]*database.File)
 	for i := range files {
 		fileMap[files[i].Path] = &files[i]
 	}
@@ -288,8 +290,8 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 				childNode.Size = file.Size
 				childNode.Status = file.Status
 
-				var mediaInfo *runner.MediaInfo
-				mediaInfo, err = runner.GetMediaInfoByFileID(s.db, file.ID)
+				var mediaInfo *database.MediaInfo
+				mediaInfo, err = database.GetMediaInfoByFileID(s.db, file.ID)
 				if err == nil {
 					childNode.Codec = mediaInfo.VideoCodec
 				}
@@ -431,7 +433,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 
-	items, err := runner.GetQueueItems(s.db, status)
+	items, err := database.GetQueueItems(s.db, status)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -498,13 +500,13 @@ func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Delete task logs first
-	if err := runner.DeleteTaskLogsByQueueItem(s.db, uint(id)); err != nil {
+	if err := database.DeleteTaskLogsByQueueItem(s.db, uint(id)); err != nil {
 		http.Error(w, fmt.Sprintf("failed to delete task logs: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	// Delete queue item
-	if err := runner.DeleteQueueItem(s.db, uint(id)); err != nil {
+	if err := database.DeleteQueueItem(s.db, uint(id)); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -540,7 +542,7 @@ func (s *Server) handleQueueLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get logs
-	logs, err := runner.GetTaskLogsByQueueItem(s.db, uint(id))
+	logs, err := database.GetTaskLogsByQueueItem(s.db, uint(id))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -554,10 +556,10 @@ func (s *Server) handleQueueLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 // renderQueueItemHTML renders a queue item as HTML.
-func (s *Server) renderQueueItemHTML(item *runner.QueueItem) (string, error) {
+func (s *Server) renderQueueItemHTML(item *database.QueueItem) (string, error) {
 	// Ensure File is preloaded
 	if item.File == nil {
-		var file runner.File
+		var file database.File
 		if err := s.db.First(&file, item.FileID).Error; err != nil {
 			return "", fmt.Errorf("failed to load file: %w", err)
 		}
@@ -592,7 +594,7 @@ func (s *Server) handleQueueItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var item runner.QueueItem
+	var item database.QueueItem
 	if err := s.db.Preload("File").First(&item, uint(id)).Error; err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

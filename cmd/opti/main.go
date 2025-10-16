@@ -12,7 +12,10 @@ import (
 	"syscall"
 
 	"github.com/kjbreil/opti/internal/config"
+	"github.com/kjbreil/opti/internal/database"
+	"github.com/kjbreil/opti/internal/queue"
 	"github.com/kjbreil/opti/internal/runner"
+	"github.com/kjbreil/opti/internal/scanner"
 	"github.com/kjbreil/opti/internal/web"
 )
 
@@ -99,7 +102,7 @@ func main() {
 		configFilePath = *configPathLong
 	}
 
-	var loadedConfig *runner.Config
+	var loadedConfig *config.Config
 	if configFilePath != "" {
 		var err error
 		loadedConfig, err = config.LoadFromFile(configFilePath)
@@ -110,7 +113,7 @@ func main() {
 	}
 
 	// Build CLI flags config
-	cliConfig := runner.Config{
+	cliConfig := config.Config{
 		SourceDirs:   sourceDirs,
 		WorkDir:      *workDir,
 		Interactive:  *interactive,
@@ -149,10 +152,10 @@ func main() {
 	}
 
 	// Normalize config paths (set defaults for ffmpeg/ffprobe)
-	runner.NormalizeConfig(&cfg)
+	config.NormalizeConfig(&cfg)
 
 	// Initialize database
-	db, err := runner.InitDB(cfg.WorkDir, cfg.Debug)
+	db, err := database.InitDB(cfg.WorkDir, cfg.Debug)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "opti: failed to initialize database: %v\n", err)
 		os.Exit(1)
@@ -162,7 +165,7 @@ func main() {
 	}
 
 	// Create queue processor
-	queueProc := runner.NewQueueProcessor(db, cfg)
+	queueProc := queue.NewQueueProcessor(db, cfg)
 
 	// Create web server
 	webServer, err := web.NewServer(db, cfg, queueProc)
@@ -207,7 +210,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 		var runErr error
-		if runErr = runner.Run(ctx, cfg); runErr != nil && !errors.Is(runErr, context.Canceled) {
+		if runErr = scanner.Run(ctx, cfg); runErr != nil && !errors.Is(runErr, context.Canceled) {
 			fmt.Fprintf(os.Stderr, "opti: scanner error: %v\n", runErr)
 		}
 	}()

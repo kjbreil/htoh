@@ -374,9 +374,9 @@ func TestProbeIntegration(t *testing.T) {
 
 	// Run actual probe
 	ctx := context.Background()
-	info, err := probe(ctx, ffprobePath, testFile)
+	info, err := Probe(ctx, ffprobePath, testFile)
 	if err != nil {
-		t.Fatalf("probe() failed: %v", err)
+		t.Fatalf("Probe() failed: %v", err)
 	}
 
 	// Verify expected values
