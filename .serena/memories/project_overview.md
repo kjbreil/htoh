@@ -16,7 +16,7 @@ v0.3.3
 - **Language:** Go 1.24.2 (minimum 1.21+)
 - **External Tools:** FFmpeg and FFprobe (required on PATH or via flags)
 - **Dependencies:** Pure Go standard library (no external Go modules)
-- **Module Path:** opti.local/opti
+- **Module Path:** github.com/kjbreil/opti
 
 ## Repository Structure
 ```

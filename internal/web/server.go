@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kjbreil/opti/internal/runner"
 	"gorm.io/gorm"
-	"opti.local/opti/internal/runner"
 )
 
 // Server represents the web server.

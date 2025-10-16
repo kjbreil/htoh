@@ -11,9 +11,9 @@ import (
 	"sync"
 	"syscall"
 
-	"opti.local/opti/internal/config"
-	"opti.local/opti/internal/runner"
-	"opti.local/opti/internal/web"
+	"github.com/kjbreil/opti/internal/config"
+	"github.com/kjbreil/opti/internal/runner"
+	"github.com/kjbreil/opti/internal/web"
 )
 
 // stringSlice is a custom flag type that allows multiple values.

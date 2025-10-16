@@ -5,7 +5,7 @@ import (
 	"os"
 
 	"github.com/BurntSushi/toml"
-	"opti.local/opti/internal/runner"
+	"github.com/kjbreil/opti/internal/runner"
 )
 
 // TomlConfig represents the TOML configuration file structure.

@@ -111,7 +111,7 @@ The sections below outline how to prepare common operating systems for building 
    brew install --cask goland
    ```
 3. Open the project in GoLand. The IDE will auto-detect `/usr/local/go` or the Homebrew Go in `/opt/homebrew/opt/go/libexec` on Apple Silicon.
-4. In **Run Configurations**, select `Package`, set the package path to `opti.local/opti/cmd/opti`, and add any environment overrides (`GOCACHE`, `FFMPEG`, etc.).
+4. In **Run Configurations**, select `Package`, set the package path to `github.com/kjbreil/opti/cmd/opti`, and add any environment overrides (`GOCACHE`, `FFMPEG`, etc.).
 
 ### Windows 10 / 11
 1. Install Go from the official MSI installer: [https://go.dev/dl/](https://go.dev/dl/).  
