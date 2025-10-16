@@ -209,6 +209,17 @@
             border-color: #3a6a9a;
         }
 
+        .btn-requeue {
+            background: #4a3a00;
+            border-color: #6a5a00;
+            color: #ffb74d;
+        }
+
+        .btn-requeue:hover {
+            background: #6a5a00;
+            border-color: #8a7a00;
+        }
+
         .loading {
             text-align: center;
             padding: 40px;
@@ -261,22 +272,50 @@
         }
 
         .queue-item {
-            display: flex;
-            align-items: center;
-            padding: 10px 12px;
             border: 1px solid #2a2a2a;
             background: #151515;
             margin-bottom: 2px;
         }
 
-        .queue-item:hover {
+        .queue-item-header {
+            display: flex;
+            align-items: center;
+            padding: 10px 12px;
+        }
+
+        .queue-item-header:hover {
             background: #1f1f1f;
-            border-color: #3a3a3a;
+        }
+
+        .queue-item.expanded .queue-item-header {
+            background: #1f1f1f;
+            border-bottom: 1px solid #2a2a2a;
+        }
+
+        .queue-expand-btn {
+            width: 20px;
+            height: 20px;
+            background: none;
+            border: 1px solid #444;
+            color: #888;
+            cursor: pointer;
+            margin-right: 8px;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+        }
+
+        .queue-expand-btn:hover {
+            border-color: #666;
+            color: #aaa;
         }
 
         .queue-item-name {
             flex: 1;
             font-size: 13px;
+            cursor: pointer;
         }
 
         .queue-item-info {
@@ -285,6 +324,98 @@
             margin-right: 15px;
             font-size: 12px;
             color: #888;
+        }
+
+        .queue-item-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .btn-delete {
+            padding: 4px 8px;
+            background: #3a0000;
+            border: 1px solid #550000;
+            color: #f44336;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 11px;
+        }
+
+        .btn-delete:hover {
+            background: #550000;
+            border-color: #770000;
+        }
+
+        .queue-logs {
+            display: none;
+            padding: 12px;
+            background: #0a0a0a;
+            border-top: 1px solid #2a2a2a;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .queue-item.expanded .queue-logs {
+            display: block;
+        }
+
+        .log-entry {
+            padding: 6px 8px;
+            margin-bottom: 4px;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+            border-left: 3px solid #444;
+            background: #0f0f0f;
+        }
+
+        .log-entry.info {
+            border-left-color: #4a9eff;
+        }
+
+        .log-entry.warning {
+            border-left-color: #ffeb3b;
+            background: #1a1a00;
+        }
+
+        .log-entry.error {
+            border-left-color: #f44336;
+            background: #1a0000;
+        }
+
+        .log-timestamp {
+            color: #666;
+            margin-right: 10px;
+        }
+
+        .log-level {
+            display: inline-block;
+            width: 60px;
+            font-weight: bold;
+            text-transform: uppercase;
+            font-size: 10px;
+        }
+
+        .log-level.info {
+            color: #4a9eff;
+        }
+
+        .log-level.warning {
+            color: #ffeb3b;
+        }
+
+        .log-level.error {
+            color: #f44336;
+        }
+
+        .log-message {
+            color: #e0e0e0;
+        }
+
+        .logs-loading {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+            font-size: 12px;
         }
 
         .progress-bar {
@@ -339,6 +470,38 @@
             margin-left: 10px;
             font-size: 12px;
         }
+
+        .inline-progress {
+            display: none;
+            font-size: 11px;
+            color: #888;
+            font-family: 'Courier New', monospace;
+        }
+
+        .inline-progress.active {
+            display: inline;
+        }
+
+        .inline-progress .sep {
+            color: #666;
+            margin: 0 6px;
+        }
+
+        .inline-progress .fps {
+            color: #4a9eff;
+        }
+
+        .inline-progress .speed {
+            color: #51cf66;
+        }
+
+        .inline-progress .time {
+            color: #888;
+        }
+
+        .inline-progress .size {
+            color: #ffb74d;
+        }
     </style>
 </head>
 <body>
@@ -390,9 +553,9 @@
 
         eventSource.addEventListener('queue_updated', (e) => {
             const data = JSON.parse(e.data);
-            // Reload tree and queue to update status
+            // Only reload tree to update file status badges
+            // Queue item will be updated via queue_item_html event
             loadTree();
-            loadQueue();
         });
 
         eventSource.addEventListener('scan_complete', (e) => {
@@ -401,12 +564,70 @@
             loadTree();
         });
 
+        eventSource.addEventListener('task_log', (e) => {
+            const data = JSON.parse(e.data);
+            const logData = data.data;
+            const queueItemId = logData.queue_item_id;
+
+            // Only append log if this item is expanded
+            const item = document.getElementById('queue-item-' + queueItemId);
+            if (item && item.classList.contains('expanded')) {
+                appendLogEntry(queueItemId, logData);
+            }
+        });
+
+        eventSource.addEventListener('progress_update', (e) => {
+            const data = JSON.parse(e.data);
+            const progressData = data.data;
+            const queueItemId = progressData.queue_item_id;
+
+            // Update progress display
+            updateProgressDisplay(queueItemId, progressData);
+        });
+
+        eventSource.addEventListener('queue_item_html', (e) => {
+            const data = JSON.parse(e.data);
+            const htmlData = data.data;
+            const queueItemId = htmlData.queue_item_id;
+            const html = htmlData.html;
+
+            const existingItem = document.getElementById('queue-item-' + queueItemId);
+
+            if (existingItem) {
+                // Preserve expanded state
+                const wasExpanded = existingItem.classList.contains('expanded');
+                const logsWereLoaded = logsLoaded.has(queueItemId);
+
+                // Replace with new HTML
+                const temp = document.createElement('div');
+                temp.innerHTML = html;
+                const newItem = temp.firstElementChild;
+
+                existingItem.replaceWith(newItem);
+
+                // Restore expanded state
+                if (wasExpanded) {
+                    newItem.classList.add('expanded');
+                    const expandBtn = newItem.querySelector('.queue-expand-btn');
+                    if (expandBtn) {
+                        expandBtn.textContent = '▼';
+                    }
+
+                    // Reload logs if they were previously loaded
+                    if (logsWereLoaded) {
+                        loadLogs(queueItemId);
+                    }
+                }
+            } else {
+                // New item - reload entire queue to add it
+                loadQueue();
+            }
+        });
+
         // Load tree on page load
         document.addEventListener('DOMContentLoaded', () => {
             loadTree();
             loadQueue();
-            // Auto-refresh queue every 2 seconds
-            setInterval(loadQueue, 2000);
         });
 
         function loadTree() {
@@ -494,12 +715,16 @@
             }
             html += '</div>';
 
-            // Convert button
+            // Convert or Requeue button
             if (canConvert) {
                 const disabled = node.status === 'queued' || node.status === 'processing';
                 html += '<button class="btn btn-primary" onclick="convert(\'' +
                         escapeHtml(node.path) + '\', ' + node.is_dir + ')" ' +
                         (disabled ? 'disabled' : '') + '>Convert</button>';
+            } else if (node.status === 'failed' && !node.is_dir && (node.codec === 'h264' || node.codec === 'avc')) {
+                // Show requeue button for failed H.264 files
+                html += '<button class="btn btn-requeue" onclick="convert(\'' +
+                        escapeHtml(node.path) + '\', false)">Requeue</button>';
             }
 
             html += '</div>'; // tree-node
@@ -621,10 +846,33 @@
 
         // Load queue
         function loadQueue() {
+            // Save expanded states before re-rendering
+            const expandedItems = new Set();
+            document.querySelectorAll('.queue-item.expanded').forEach(item => {
+                expandedItems.add(item.id.replace('queue-item-', ''));
+            });
+
             fetch('/api/queue')
                 .then(r => r.json())
                 .then(items => {
                     document.getElementById('queue-container').innerHTML = renderQueue(items);
+
+                    // Restore expanded states and reload logs
+                    expandedItems.forEach(itemId => {
+                        const item = document.getElementById('queue-item-' + itemId);
+                        if (item) {
+                            item.classList.add('expanded');
+                            const expandBtn = item.querySelector('.queue-expand-btn');
+                            if (expandBtn) {
+                                expandBtn.textContent = '▼';
+                            }
+
+                            // Reload logs if they were previously loaded
+                            if (logsLoaded.has(parseInt(itemId))) {
+                                loadLogs(parseInt(itemId));
+                            }
+                        }
+                    });
                 })
                 .catch(err => {
                     document.getElementById('queue-container').innerHTML =
@@ -648,23 +896,211 @@
                 const fileName = item.File ? item.File.Name : 'Unknown';
                 const status = item.Status || 'queued';
                 const error = item.ErrorMessage || '';
+                const itemId = item.ID;
 
-                html += '<li class="queue-item">';
-                html += '<span class="queue-item-name">' + escapeHtml(fileName) + '</span>';
+                html += '<li class="queue-item" id="queue-item-' + itemId + '">';
+
+                // Header
+                html += '<div class="queue-item-header">';
+                html += '<button class="queue-expand-btn" onclick="toggleQueueItem(' + itemId + ')">▶</button>';
+                html += '<span class="queue-item-name" onclick="toggleQueueItem(' + itemId + ')">' + escapeHtml(fileName) + '</span>';
 
                 html += '<div class="queue-item-info">';
                 html += '<span class="tree-status ' + status + '">' + status + '</span>';
+
+                // Inline progress (shown during processing)
+                html += '<span class="inline-progress" id="inline-progress-' + itemId + '">';
+                html += '<span class="fps" id="progress-fps-' + itemId + '">--</span>';
+                html += '<span class="sep">•</span>';
+                html += '<span class="speed" id="progress-speed-' + itemId + '">--</span>';
+                html += '<span class="sep">•</span>';
+                html += '<span class="time" id="progress-time-' + itemId + '">--</span>';
+                html += '<span class="sep">•</span>';
+                html += '<span class="size" id="progress-size-' + itemId + '">--</span>';
+                html += '</span>';
 
                 if (error) {
                     html += '<span style="color: #f44336;" title="' + escapeHtml(error) + '">⚠ Error</span>';
                 }
 
                 html += '</div>';
+
+                html += '<div class="queue-item-actions">';
+                html += '<button class="btn btn-delete" onclick="deleteQueueItem(' + itemId + ')">Delete</button>';
+                html += '</div>';
+
+                html += '</div>'; // queue-item-header
+
+                // Logs section (initially hidden)
+                html += '<div class="queue-logs" id="queue-logs-' + itemId + '">';
+                html += '<div class="logs-loading">Click to load logs...</div>';
+                html += '</div>';
+
                 html += '</li>';
             }
             html += '</ul>';
 
             return html;
+        }
+
+        // Track which items have loaded logs
+        const logsLoaded = new Set();
+
+        function toggleQueueItem(itemId) {
+            const item = document.getElementById('queue-item-' + itemId);
+            const logsContainer = document.getElementById('queue-logs-' + itemId);
+            const expandBtn = item.querySelector('.queue-expand-btn');
+
+            if (item.classList.contains('expanded')) {
+                // Collapse
+                item.classList.remove('expanded');
+                expandBtn.textContent = '▶';
+            } else {
+                // Expand
+                item.classList.add('expanded');
+                expandBtn.textContent = '▼';
+
+                // Load logs if not already loaded
+                if (!logsLoaded.has(itemId)) {
+                    loadLogs(itemId);
+                }
+            }
+        }
+
+        function loadLogs(itemId) {
+            const logsContainer = document.getElementById('queue-logs-' + itemId);
+            logsContainer.innerHTML = '<div class="logs-loading"><div class="spinner"></div><div style="margin-top: 10px;">Loading logs...</div></div>';
+
+            fetch('/api/queue/logs?id=' + itemId)
+                .then(r => r.json())
+                .then(logs => {
+                    logsLoaded.add(itemId);
+                    logsContainer.innerHTML = renderLogs(logs);
+                    // No more polling - SSE will push new logs in real-time!
+                })
+                .catch(err => {
+                    logsContainer.innerHTML = '<div class="logs-loading" style="color: #f44336;">Error loading logs: ' + err.message + '</div>';
+                });
+        }
+
+        function appendLogEntry(itemId, logData) {
+            const logsContainer = document.getElementById('queue-logs-' + itemId);
+            if (!logsContainer) return;
+
+            // If logs haven't been loaded yet, just mark as loaded and clear the placeholder
+            if (!logsLoaded.has(itemId)) {
+                logsLoaded.add(itemId);
+                logsContainer.innerHTML = '';
+            }
+
+            // Create and append new log entry
+            const timestamp = new Date(logData.created_at).toLocaleTimeString();
+            const level = logData.log_level || 'info';
+            const message = logData.message || '';
+
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry ' + level;
+            logEntry.innerHTML =
+                '<span class="log-timestamp">' + timestamp + '</span>' +
+                '<span class="log-level ' + level + '">' + level + '</span>' +
+                '<span class="log-message">' + escapeHtml(message) + '</span>';
+
+            logsContainer.appendChild(logEntry);
+
+            // Auto-scroll to bottom
+            logsContainer.scrollTop = logsContainer.scrollHeight;
+        }
+
+        function renderLogs(logs) {
+            if (!logs || logs.length === 0) {
+                return '<div class="logs-loading">No logs available yet</div>';
+            }
+
+            let html = '';
+            for (const log of logs) {
+                const timestamp = new Date(log.CreatedAt).toLocaleTimeString();
+                const level = log.LogLevel || 'info';
+                const message = log.Message || '';
+
+                html += '<div class="log-entry ' + level + '">';
+                html += '<span class="log-timestamp">' + timestamp + '</span>';
+                html += '<span class="log-level ' + level + '">' + level + '</span>';
+                html += '<span class="log-message">' + escapeHtml(message) + '</span>';
+                html += '</div>';
+            }
+
+            return html;
+        }
+
+        function updateProgressDisplay(itemId, progressData) {
+            const progressContainer = document.getElementById('inline-progress-' + itemId);
+            if (!progressContainer) return;
+
+            // Show progress inline if we have meaningful data
+            if (progressData.fps > 0 || progressData.out_time_s > 0) {
+                progressContainer.classList.add('active');
+
+                // Update FPS
+                const fpsElem = document.getElementById('progress-fps-' + itemId);
+                if (fpsElem && progressData.fps > 0) {
+                    fpsElem.textContent = progressData.fps.toFixed(1) + ' fps';
+                }
+
+                // Update Speed
+                const speedElem = document.getElementById('progress-speed-' + itemId);
+                if (speedElem && progressData.speed) {
+                    speedElem.textContent = progressData.speed;
+                }
+
+                // Update Time
+                const timeElem = document.getElementById('progress-time-' + itemId);
+                if (timeElem && progressData.out_time_s > 0) {
+                    timeElem.textContent = formatTime(progressData.out_time_s);
+                }
+
+                // Update Size
+                const sizeElem = document.getElementById('progress-size-' + itemId);
+                if (sizeElem && progressData.size_bytes > 0) {
+                    sizeElem.textContent = formatSize(progressData.size_bytes);
+                }
+            }
+        }
+
+        function formatTime(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = Math.floor(seconds % 60);
+
+            if (h > 0) {
+                return h + 'h ' + m + 'm ' + s + 's';
+            } else if (m > 0) {
+                return m + 'm ' + s + 's';
+            } else {
+                return s + 's';
+            }
+        }
+
+        function deleteQueueItem(itemId) {
+            if (!confirm('Are you sure you want to delete this queue item?')) {
+                return;
+            }
+
+            fetch('/api/queue/delete?id=' + itemId, {
+                method: 'POST'
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    showNotification('Queue item deleted');
+                    loadQueue();
+                    loadTree();
+                } else {
+                    showNotification('Error: ' + data.message, true);
+                }
+            })
+            .catch(err => {
+                showNotification('Error: ' + err.message, true);
+            });
         }
     </script>
 </body>

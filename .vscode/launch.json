@@ -1,0 +1,50 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch opti with config.toml",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/cmd/opti",
+            "args": [
+                "-c",
+                "${workspaceFolder}/config.toml"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {},
+            "showLog": true
+        },
+        {
+            "name": "Launch opti with config.toml (custom port)",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/cmd/opti",
+            "args": [
+                "-c",
+                "${workspaceFolder}/config.toml",
+                "-port",
+                "9000"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {},
+            "showLog": true
+        },
+        {
+            "name": "Launch opti with config.toml (debug mode)",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/cmd/opti",
+            "args": [
+                "-c",
+                "${workspaceFolder}/config.toml",
+                "-debug"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {},
+            "showLog": true
+        }
+    ]
+}

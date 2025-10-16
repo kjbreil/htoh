@@ -56,6 +56,19 @@ func (p *Prog) Fail(wid int, err string) {
 	}
 }
 
+// GetProgress returns a copy of the current progress for a worker
+func (p *Prog) GetProgress(wid int) *Row {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	r := p.rows[wid]
+	if r == nil {
+		return nil
+	}
+	// Return a copy to avoid race conditions
+	rowCopy := *r
+	return &rowCopy
+}
+
 func (p *Prog) RenderLoop(stop <-chan struct{}) {
 	t := time.NewTicker(300 * time.Millisecond)
 	defer t.Stop()

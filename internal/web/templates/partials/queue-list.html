@@ -1,0 +1,13 @@
+{{if .}}
+<ul class="queue-list">
+    {{range .}}
+    {{template "partials/queue-item.html" .}}
+    {{end}}
+</ul>
+{{else}}
+<div class="empty-state">
+    <div class="empty-state-icon">📋</div>
+    <div>No items in queue</div>
+    <div style="margin-top: 8px; font-size: 12px;">Add files from the Files tab to start transcoding</div>
+</div>
+{{end}}

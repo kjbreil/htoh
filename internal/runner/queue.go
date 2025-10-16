@@ -11,12 +11,20 @@ import (
 	"gorm.io/gorm"
 )
 
+// LogBroadcaster is an interface for broadcasting log events
+type LogBroadcaster interface {
+	BroadcastTaskLog(queueItemID, fileID uint, logLevel, message string, timestamp string)
+	BroadcastProgressUpdate(queueItemID, fileID uint, fps float64, speed string, outTimeS float64, sizeBytes int64, device string)
+}
+
 // QueueProcessor manages the transcoding queue
 type QueueProcessor struct {
-	db     *gorm.DB
-	cfg    Config
-	mu     sync.RWMutex
-	active map[uint]bool // track active queue items
+	db              *gorm.DB
+	cfg             Config
+	mu              sync.RWMutex
+	active          map[uint]bool // track active queue items
+	broadcaster     LogBroadcaster
+	htmlBroadcaster func(uint)
 }
 
 // NewQueueProcessor creates a new queue processor
@@ -25,6 +33,34 @@ func NewQueueProcessor(db *gorm.DB, cfg Config) *QueueProcessor {
 		db:     db,
 		cfg:    cfg,
 		active: make(map[uint]bool),
+	}
+}
+
+// SetBroadcaster sets the log broadcaster for SSE events
+func (qp *QueueProcessor) SetBroadcaster(broadcaster LogBroadcaster) {
+	qp.broadcaster = broadcaster
+}
+
+// SetHTMLBroadcaster sets the HTML broadcaster for queue item updates
+func (qp *QueueProcessor) SetHTMLBroadcaster(fn func(uint)) {
+	qp.htmlBroadcaster = fn
+}
+
+// broadcastHTML broadcasts an HTML update for a queue item
+func (qp *QueueProcessor) broadcastHTML(queueItemID uint) {
+	if qp.htmlBroadcaster != nil {
+		qp.htmlBroadcaster(queueItemID)
+	}
+}
+
+// logAndBroadcast creates a task log and broadcasts it via SSE
+func (qp *QueueProcessor) logAndBroadcast(queueItemID, fileID uint, logLevel, message string) {
+	// Create log in database
+	CreateTaskLog(qp.db, queueItemID, fileID, logLevel, message)
+
+	// Broadcast via SSE if broadcaster is set
+	if qp.broadcaster != nil {
+		qp.broadcaster.BroadcastTaskLog(queueItemID, fileID, logLevel, message, time.Now().Format(time.RFC3339))
 	}
 }
 
@@ -128,23 +164,35 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 		fmt.Fprintf(os.Stderr, "[worker %d] Failed to update queue item status: %v\n", workerID, err)
 		return
 	}
+	qp.broadcastHTML(item.ID)
+
+	// Log: Task started
+	qp.logAndBroadcast(item.ID, item.FileID, "info", fmt.Sprintf("Task started on worker %d", workerID))
 
 	if !qp.cfg.Silent {
 		fmt.Printf("[worker %d] Processing: %s\n", workerID, item.File.Name)
 	}
 
 	// Get media info for the file
+	qp.logAndBroadcast(item.ID, item.FileID, "info", "Retrieving media information...")
 	mediaInfo, err := GetMediaInfoByFileID(qp.db, item.FileID)
 	if err != nil {
 		errMsg := fmt.Sprintf("failed to get media info: %v", err)
+		qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
 		UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg)
+		qp.broadcastHTML(item.ID)
 		return
 	}
+
+	qp.logAndBroadcast(item.ID, item.FileID, "info", fmt.Sprintf("Media info retrieved: codec=%s, resolution=%dx%d, fps=%.2f, bitrate=%d",
+		mediaInfo.VideoCodec, mediaInfo.Width, mediaInfo.Height, mediaInfo.FPS, mediaInfo.VideoBitrate))
 
 	// Check if file is H.264/AVC
 	if mediaInfo.VideoCodec != "h264" && mediaInfo.VideoCodec != "avc" {
 		errMsg := fmt.Sprintf("file is not H.264/AVC (codec: %s)", mediaInfo.VideoCodec)
+		qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
 		UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg)
+		qp.broadcastHTML(item.ID)
 		return
 	}
 
@@ -159,6 +207,7 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 
 	// Determine quality and output container
 	quality := deriveQualityChoice(probeInfo, qp.cfg.FastMode)
+	qp.logAndBroadcast(item.ID, item.FileID, "info", fmt.Sprintf("Quality settings determined: %v", quality))
 
 	container := "mkv"
 	faststart := false
@@ -170,10 +219,14 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 		faststart = true
 	}
 
+	qp.logAndBroadcast(item.ID, item.FileID, "info", fmt.Sprintf("Output format: %s (faststart: %v)", container, faststart))
+
 	// Build output path
 	ext := filepath.Ext(item.File.Path)
 	baseName := item.File.Name[:len(item.File.Name)-len(ext)]
 	outTarget := filepath.Join(qp.cfg.WorkDir, fmt.Sprintf("%s.hevc.%s", baseName, container))
+
+	qp.logAndBroadcast(item.ID, item.FileID, "info", fmt.Sprintf("Output path: %s", outTarget))
 
 	// Create job
 	job := job{
@@ -188,10 +241,47 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 	// Create a simple progress tracker (no live dashboard for queue mode)
 	prog := NewProg()
 
+	// Start progress broadcasting goroutine
+	progressCtx, cancelProgress := context.WithCancel(ctx)
+	defer cancelProgress()
+
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-progressCtx.Done():
+				return
+			case <-ticker.C:
+				// Get current progress from prog
+				if row := prog.GetProgress(workerID); row != nil && qp.broadcaster != nil {
+					// Only broadcast if we have meaningful progress data
+					if row.FPS > 0 || row.OutTimeS > 0 {
+						qp.broadcaster.BroadcastProgressUpdate(
+							item.ID,
+							item.FileID,
+							row.FPS,
+							row.Speed,
+							row.OutTimeS,
+							row.SizeBytes,
+							row.Device,
+						)
+					}
+				}
+			}
+		}
+	}()
+
 	// Transcode
-	if err := transcode(ctx, qp.cfg, job, workerID, prog); err != nil {
+	qp.logAndBroadcast(item.ID, item.FileID, "info", "Starting transcoding...")
+	if err := transcode(ctx, qp.cfg, job, workerID, prog, func(msg string) {
+		qp.logAndBroadcast(item.ID, item.FileID, "info", msg)
+	}); err != nil {
 		errMsg := fmt.Sprintf("transcoding failed: %v", err)
+		qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
 		UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg)
+		qp.broadcastHTML(item.ID)
 
 		// Update file status
 		if err := qp.db.Model(&File{}).Where("id = ?", item.FileID).Update("status", "failed").Error; err != nil {
@@ -200,16 +290,21 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 		return
 	}
 
+	qp.logAndBroadcast(item.ID, item.FileID, "info", "Transcoding completed successfully")
+
 	// Mark as done
 	if err := UpdateQueueItemStatus(qp.db, item.ID, "done", ""); err != nil {
 		fmt.Fprintf(os.Stderr, "[worker %d] Failed to mark queue item as done: %v\n", workerID, err)
 		return
 	}
+	qp.broadcastHTML(item.ID)
 
 	// Update file status
 	if err := qp.db.Model(&File{}).Where("id = ?", item.FileID).Update("status", "done").Error; err != nil {
 		fmt.Fprintf(os.Stderr, "[worker %d] Failed to update file status: %v\n", workerID, err)
 	}
+
+	qp.logAndBroadcast(item.ID, item.FileID, "info", "Task completed successfully")
 
 	if !qp.cfg.Silent {
 		fmt.Printf("[worker %d] Completed: %s\n", workerID, item.File.Name)

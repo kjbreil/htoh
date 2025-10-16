@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -29,22 +30,56 @@ type Server struct {
 func NewServer(db *gorm.DB, cfg runner.Config, queueProc *runner.QueueProcessor) (*Server, error) {
 	broadcaster := NewEventBroadcaster()
 
+	// Set broadcaster on queue processor for real-time log events
+	queueProc.SetBroadcaster(broadcaster)
+
 	// Parse templates
-	tmpl, err := template.New("").Funcs(template.FuncMap{
+	tmpl := template.New("").Funcs(template.FuncMap{
 		"formatSize":  formatSize,
 		"formatCodec": formatCodec,
-	}).ParseGlob(filepath.Join("internal", "web", "templates", "*.html"))
+	})
+
+	// Load root templates
+	tmpl, err := tmpl.ParseGlob(filepath.Join("internal", "web", "templates", "*.html"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse templates: %w", err)
 	}
 
-	return &Server{
+	// Load partials (if they exist)
+	partialsPath := filepath.Join("internal", "web", "templates", "partials", "*.html")
+	if matches, _ := filepath.Glob(partialsPath); len(matches) > 0 {
+		tmpl, err = tmpl.ParseGlob(partialsPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse partial templates: %w", err)
+		}
+	}
+
+	s := &Server{
 		db:          db,
 		cfg:         cfg,
 		broadcaster: broadcaster,
 		queueProc:   queueProc,
 		templates:   tmpl,
-	}, nil
+	}
+
+	// Set HTML broadcaster for queue item status updates
+	queueProc.SetHTMLBroadcaster(func(queueItemID uint) {
+		var item runner.QueueItem
+		if err := db.Preload("File").First(&item, queueItemID).Error; err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to load queue item for HTML render: %v\n", err)
+			return
+		}
+
+		html, err := s.renderQueueItemHTML(&item)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to render queue item HTML: %v\n", err)
+			return
+		}
+
+		broadcaster.BroadcastQueueItemHTML(queueItemID, html)
+	})
+
+	return s, nil
 }
 
 // Start starts the HTTP server
@@ -57,6 +92,9 @@ func (s *Server) Start(ctx context.Context, port int) error {
 	mux.HandleFunc("/api/convert", s.handleConvert)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/queue", s.handleQueue)
+	mux.HandleFunc("/api/queue/item", s.handleQueueItem)
+	mux.HandleFunc("/api/queue/delete", s.handleQueueDelete)
+	mux.HandleFunc("/api/queue/logs", s.handleQueueLogs)
 
 	addr := fmt.Sprintf("0.0.0.0:%d", port)
 	server := &http.Server{
@@ -399,5 +437,115 @@ func formatCodec(codec string) string {
 		return "H.265"
 	default:
 		return codec
+	}
+}
+
+// handleQueueDelete handles deletion of a queue item
+func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	idStr := r.URL.Query().Get("id")
+	if idStr == "" {
+		http.Error(w, "id parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	// Parse ID
+	var id uint64
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		http.Error(w, "invalid id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Delete task logs first
+	if err := runner.DeleteTaskLogsByQueueItem(s.db, uint(id)); err != nil {
+		http.Error(w, fmt.Sprintf("failed to delete task logs: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Delete queue item
+	if err := runner.DeleteQueueItem(s.db, uint(id)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Queue item deleted successfully",
+	})
+}
+
+// handleQueueLogs returns logs for a specific queue item
+func (s *Server) handleQueueLogs(w http.ResponseWriter, r *http.Request) {
+	idStr := r.URL.Query().Get("id")
+	if idStr == "" {
+		http.Error(w, "id parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	// Parse ID
+	var id uint64
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		http.Error(w, "invalid id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Get logs
+	logs, err := runner.GetTaskLogsByQueueItem(s.db, uint(id))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(logs)
+}
+
+// renderQueueItemHTML renders a queue item as HTML
+func (s *Server) renderQueueItemHTML(item *runner.QueueItem) (string, error) {
+	// Ensure File is preloaded
+	if item.File == nil {
+		var file runner.File
+		if err := s.db.First(&file, item.FileID).Error; err != nil {
+			return "", fmt.Errorf("failed to load file: %w", err)
+		}
+		item.File = &file
+	}
+
+	var buf bytes.Buffer
+	if err := s.templates.ExecuteTemplate(&buf, "queue-item.html", item); err != nil {
+		return "", fmt.Errorf("failed to render template: %w", err)
+	}
+
+	return buf.String(), nil
+}
+
+// handleQueueItem returns a single queue item as HTML
+func (s *Server) handleQueueItem(w http.ResponseWriter, r *http.Request) {
+	idStr := r.URL.Query().Get("id")
+	if idStr == "" {
+		http.Error(w, "id parameter required", http.StatusBadRequest)
+		return
+	}
+
+	var id uint64
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	var item runner.QueueItem
+	if err := s.db.Preload("File").First(&item, uint(id)).Error; err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html")
+	if err := s.templates.ExecuteTemplate(w, "queue-item.html", &item); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }

@@ -70,6 +70,18 @@ type QueueItem struct {
 	UpdatedAt    time.Time
 }
 
+// TaskLog represents a log entry for a transcoding task
+type TaskLog struct {
+	ID          uint       `gorm:"primaryKey"`
+	QueueItemID uint       `gorm:"index;not null"` // foreign key to QueueItem
+	QueueItem   *QueueItem `gorm:"foreignKey:QueueItemID"`
+	FileID      uint       `gorm:"index;not null"` // foreign key to File (for easier queries)
+	File        *File      `gorm:"foreignKey:FileID"`
+	LogLevel    string     `gorm:"index"`     // info, warning, error
+	Message     string     `gorm:"type:text"` // log message
+	CreatedAt   time.Time
+}
+
 // InitDB initializes the SQLite database with GORM
 func InitDB(workDir string, debug bool) (*gorm.DB, error) {
 	// Create workDir if it doesn't exist
@@ -95,7 +107,7 @@ func InitDB(workDir string, debug bool) (*gorm.DB, error) {
 	}
 
 	// Run migrations
-	if err := db.AutoMigrate(&File{}, &MediaInfo{}, &QueueItem{}); err != nil {
+	if err := db.AutoMigrate(&File{}, &MediaInfo{}, &QueueItem{}, &TaskLog{}); err != nil {
 		return nil, fmt.Errorf("failed to migrate database: %w", err)
 	}
 
@@ -186,17 +198,29 @@ func GetMediaInfoByFileID(db *gorm.DB, fileID uint) (*MediaInfo, error) {
 
 // AddToQueue adds a file to the transcoding queue
 func AddToQueue(db *gorm.DB, fileID uint, priority int) error {
-	// Check if already in queue
+	// Check if already in queue (queued or processing)
 	var existing QueueItem
 	result := db.Where("file_id = ? AND status IN ?", fileID, []string{"queued", "processing"}).First(&existing)
 
 	if result.Error == nil {
-		// Already in queue
+		// Already in queue with active status
 		return nil
 	}
 
 	if result.Error != gorm.ErrRecordNotFound {
 		return fmt.Errorf("failed to check queue: %w", result.Error)
+	}
+
+	// Check if there's any completed or failed record for this file
+	var oldRecord QueueItem
+	oldResult := db.Where("file_id = ?", fileID).First(&oldRecord)
+
+	if oldResult.Error == nil {
+		// Delete old record and its logs to ensure only one record per file
+		DeleteTaskLogsByQueueItem(db, oldRecord.ID)
+		if err := db.Delete(&oldRecord).Error; err != nil {
+			return fmt.Errorf("failed to delete old queue record: %w", err)
+		}
 	}
 
 	// Add to queue
@@ -266,6 +290,50 @@ func GetQueueItems(db *gorm.DB, status string) ([]QueueItem, error) {
 func DeleteQueueItem(db *gorm.DB, id uint) error {
 	if err := db.Delete(&QueueItem{}, id).Error; err != nil {
 		return fmt.Errorf("failed to delete queue item: %w", err)
+	}
+	return nil
+}
+
+// CreateTaskLog creates a new task log entry
+func CreateTaskLog(db *gorm.DB, queueItemID, fileID uint, logLevel, message string) error {
+	log := &TaskLog{
+		QueueItemID: queueItemID,
+		FileID:      fileID,
+		LogLevel:    logLevel,
+		Message:     message,
+	}
+
+	if err := db.Create(log).Error; err != nil {
+		return fmt.Errorf("failed to create task log: %w", err)
+	}
+
+	return nil
+}
+
+// GetTaskLogsByQueueItem retrieves all log entries for a specific queue item
+func GetTaskLogsByQueueItem(db *gorm.DB, queueItemID uint) ([]TaskLog, error) {
+	var logs []TaskLog
+	result := db.Where("queue_item_id = ?", queueItemID).Order("created_at ASC").Find(&logs)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return logs, nil
+}
+
+// GetTaskLogsByFile retrieves all log entries for a specific file
+func GetTaskLogsByFile(db *gorm.DB, fileID uint) ([]TaskLog, error) {
+	var logs []TaskLog
+	result := db.Where("file_id = ?", fileID).Order("created_at ASC").Find(&logs)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return logs, nil
+}
+
+// DeleteTaskLogsByQueueItem deletes all log entries for a queue item
+func DeleteTaskLogsByQueueItem(db *gorm.DB, queueItemID uint) error {
+	if err := db.Where("queue_item_id = ?", queueItemID).Delete(&TaskLog{}).Error; err != nil {
+		return fmt.Errorf("failed to delete task logs: %w", err)
 	}
 	return nil
 }

@@ -15,6 +15,8 @@ const (
 	EventStatusChanged  EventType = "status_changed"
 	EventProgressUpdate EventType = "progress_update"
 	EventScanComplete   EventType = "scan_complete"
+	EventTaskLog        EventType = "task_log"
+	EventQueueItemHTML  EventType = "queue_item_html"
 )
 
 // Event represents a server-sent event
@@ -107,6 +109,47 @@ func (eb *EventBroadcaster) BroadcastScanComplete(fileCount int) {
 		Type: EventScanComplete,
 		Data: map[string]interface{}{
 			"file_count": fileCount,
+		},
+	})
+}
+
+// BroadcastTaskLog broadcasts a task log event
+func (eb *EventBroadcaster) BroadcastTaskLog(queueItemID, fileID uint, logLevel, message string, timestamp string) {
+	eb.Broadcast(Event{
+		Type: EventTaskLog,
+		Data: map[string]interface{}{
+			"queue_item_id": queueItemID,
+			"file_id":       fileID,
+			"log_level":     logLevel,
+			"message":       message,
+			"created_at":    timestamp,
+		},
+	})
+}
+
+// BroadcastProgressUpdate broadcasts a transcoding progress update event
+func (eb *EventBroadcaster) BroadcastProgressUpdate(queueItemID, fileID uint, fps float64, speed string, outTimeS float64, sizeBytes int64, device string) {
+	eb.Broadcast(Event{
+		Type: EventProgressUpdate,
+		Data: map[string]interface{}{
+			"queue_item_id": queueItemID,
+			"file_id":       fileID,
+			"fps":           fps,
+			"speed":         speed,
+			"out_time_s":    outTimeS,
+			"size_bytes":    sizeBytes,
+			"device":        device,
+		},
+	})
+}
+
+// BroadcastQueueItemHTML broadcasts an HTML fragment for a queue item
+func (eb *EventBroadcaster) BroadcastQueueItemHTML(queueItemID uint, html string) {
+	eb.Broadcast(Event{
+		Type: EventQueueItemHTML,
+		Data: map[string]interface{}{
+			"queue_item_id": queueItemID,
+			"html":          html,
 		},
 	})
 }

@@ -1,0 +1,5 @@
+<div class="log-entry {{.LogLevel}}">
+    <span class="log-timestamp">{{.CreatedAt.Format "15:04:05"}}</span>
+    <span class="log-level {{.LogLevel}}">{{.LogLevel}}</span>
+    <span class="log-message">{{.Message}}</span>
+</div>

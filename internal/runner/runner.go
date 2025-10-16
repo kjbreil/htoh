@@ -53,11 +53,8 @@ type job struct {
 	Quality   qualityChoice
 }
 
-func Run(ctx context.Context, cfg Config) error {
-	if cfg.Workers <= 0 {
-		cfg.Workers = runtime.NumCPU()
-	}
-
+// NormalizeConfig sets default values for config fields that may be empty
+func NormalizeConfig(cfg *Config) {
 	// Set default ffmpeg path if not provided
 	ffmpegPath := strings.TrimSpace(cfg.FFmpegPath)
 	if ffmpegPath == "" {
@@ -65,6 +62,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	cfg.FFmpegPath = ffmpegPath
 
+	// Set default ffprobe path if not provided
 	ffprobePath := strings.TrimSpace(cfg.FFprobePath)
 	if ffprobePath == "" {
 		ffprobePath = "ffprobe"
@@ -72,9 +70,21 @@ func Run(ctx context.Context, cfg Config) error {
 			ffprobePath = p
 		}
 	}
+	cfg.FFprobePath = ffprobePath
+
 	if cfg.Debug {
-		fmt.Printf("Using ffprobe: %s\n", ffprobePath)
+		fmt.Printf("Using ffmpeg: %s\n", cfg.FFmpegPath)
+		fmt.Printf("Using ffprobe: %s\n", cfg.FFprobePath)
 	}
+}
+
+func Run(ctx context.Context, cfg Config) error {
+	if cfg.Workers <= 0 {
+		cfg.Workers = runtime.NumCPU()
+	}
+
+	// Normalize config paths
+	NormalizeConfig(&cfg)
 
 	// Initialize database
 	db, err := InitDB(cfg.WorkDir, cfg.Debug)
@@ -99,7 +109,7 @@ func Run(ctx context.Context, cfg Config) error {
 		// Aggregate candidates from all source directories
 		var allFiles []candidate
 		for _, sourceDir := range cfg.SourceDirs {
-			files, err := listCandidates(ctx, ffprobePath, sourceDir, db, cfg.Debug)
+			files, err := listCandidates(ctx, cfg.FFprobePath, sourceDir, db, cfg.Debug)
 			if err != nil {
 				return err
 			}
@@ -400,7 +410,7 @@ func clampRange(val, min, max int) int {
 	return val
 }
 
-func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog) error {
+func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog, logFunc func(string)) error {
 	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
 		return err
 	}
@@ -523,18 +533,28 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 	}
 	args = append(args, jb.OutTarget)
 
-	// Print ffmpeg command when debug is enabled
-	if cfg.Debug {
-		cmdLine := cfg.FFmpegPath
-		for _, arg := range args {
-			// Quote arguments with spaces
-			if strings.Contains(arg, " ") {
-				cmdLine += " \"" + arg + "\""
-			} else {
-				cmdLine += " " + arg
-			}
+	// Build command line string for logging
+	cmdLine := cfg.FFmpegPath
+	for _, arg := range args {
+		// Quote arguments with spaces
+		if strings.Contains(arg, " ") {
+			cmdLine += " \"" + arg + "\""
+		} else {
+			cmdLine += " " + arg
 		}
-		fmt.Fprintf(os.Stderr, "[worker %d] ffmpeg command: %s\n", workerID, cmdLine)
+	}
+
+	// Always log the ffmpeg command to stderr
+	fmt.Fprintf(os.Stderr, "[worker %d] ffmpeg command: %s\n", workerID, cmdLine)
+
+	// Also log via callback if provided (for queue logs)
+	if logFunc != nil {
+		logFunc(fmt.Sprintf("FFmpeg command: %s", cmdLine))
+	}
+
+	// Log the command path being used (for debugging "exec: no command" errors)
+	if cfg.FFmpegPath == "" {
+		return fmt.Errorf("ffmpeg path is empty - this should not happen")
 	}
 
 	cmd := exec.CommandContext(ctx, cfg.FFmpegPath, args...)

@@ -1,0 +1,35 @@
+<li class="queue-item" id="queue-item-{{.ID}}">
+    <!-- Header -->
+    <div class="queue-item-header">
+        <button class="queue-expand-btn" onclick="toggleQueueItem({{.ID}})">▶</button>
+        <span class="queue-item-name" onclick="toggleQueueItem({{.ID}})">{{.File.Name}}</span>
+
+        <div class="queue-item-info">
+            <span class="tree-status {{.Status}}">{{.Status}}</span>
+
+            <!-- Inline progress (shown during processing) -->
+            <span class="inline-progress" id="inline-progress-{{.ID}}">
+                <span class="fps" id="progress-fps-{{.ID}}">--</span>
+                <span class="sep">•</span>
+                <span class="speed" id="progress-speed-{{.ID}}">--</span>
+                <span class="sep">•</span>
+                <span class="time" id="progress-time-{{.ID}}">--</span>
+                <span class="sep">•</span>
+                <span class="size" id="progress-size-{{.ID}}">--</span>
+            </span>
+
+            {{if .ErrorMessage}}
+            <span style="color: #f44336;" title="{{.ErrorMessage}}">⚠ Error</span>
+            {{end}}
+        </div>
+
+        <div class="queue-item-actions">
+            <button class="btn btn-delete" onclick="deleteQueueItem({{.ID}})">Delete</button>
+        </div>
+    </div>
+
+    <!-- Logs section (initially hidden) -->
+    <div class="queue-logs" id="queue-logs-{{.ID}}">
+        <div class="logs-loading">Click to load logs...</div>
+    </div>
+</li>

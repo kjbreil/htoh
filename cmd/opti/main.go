@@ -135,6 +135,9 @@ func main() {
 		cfg.Workers = 1
 	}
 
+	// Normalize config paths (set defaults for ffmpeg/ffprobe)
+	runner.NormalizeConfig(&cfg)
+
 	// Initialize database
 	db, err := runner.InitDB(cfg.WorkDir, cfg.Debug)
 	if err != nil {
