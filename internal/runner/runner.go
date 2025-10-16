@@ -369,18 +369,6 @@ func Transcode(ctx context.Context, cfg config.Config, jb Job, workerID int, pro
 	return nil
 }
 
-func findSibling(ffmpeg, name string) string {
-	if ffmpeg == "" {
-		return ""
-	}
-	dir := filepath.Dir(ffmpeg)
-	p := filepath.Join(dir, name)
-	if _, err := os.Stat(p); err == nil {
-		return p
-	}
-	return ""
-}
-
 // validateVAAPIDevice checks if the specified VAAPI device exists and is accessible.
 // If device is empty, it returns the default device (/dev/dri/renderD128) if it exists.
 // Returns the device path to use and an error if validation fails.
