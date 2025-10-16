@@ -65,17 +65,32 @@ type MediaInfo struct {
 	UpdatedAt time.Time
 }
 
+// QualityProfile represents a transcoding quality profile.
+type QualityProfile struct {
+	ID                uint      `gorm:"primaryKey"               json:"id"`
+	Name              string    `gorm:"uniqueIndex;not null"     json:"name"`
+	Description       string    `gorm:"type:text"                json:"description"`
+	Mode              string    `gorm:"not null"                 json:"mode"`               // "vbr" or "cbr"
+	TargetBitrate     int64     `gorm:"default:0"                json:"target_bitrate"`     // for CBR mode in bits per second
+	QualityLevel      int       `gorm:"default:0"                json:"quality_level"`      // for VBR mode (0-51 range)
+	BitrateMultiplier float64   `gorm:"default:0"                json:"bitrate_multiplier"` // for VBR with bitrate hint (e.g., 0.5 = 50% of source)
+	IsDefault         bool      `gorm:"default:false;index"      json:"is_default"`         // mark the default profile
+	CreatedAt         time.Time `                                json:"created_at"`
+	UpdatedAt         time.Time `                                json:"updated_at"`
+}
+
 // QueueItem represents a file in the transcoding queue.
 type QueueItem struct {
-	ID           uint      `gorm:"primaryKey"        json:"id"`
-	FileID       uint      `gorm:"index;not null"    json:"file_id"` // foreign key to File
-	File         *File     `gorm:"foreignKey:FileID" json:"file,omitempty"`
-	Status       string    `gorm:"index"             json:"status"` // queued, processing, done, failed
-	Priority     int       `gorm:"default:0"         json:"priority"`
-	QualityLevel int       `gorm:"default:0"         json:"quality_level"`           // for future use
-	ErrorMessage string    `                         json:"error_message,omitempty"` // error details if status is failed
-	CreatedAt    time.Time `                         json:"created_at"`
-	UpdatedAt    time.Time `                         json:"updated_at"`
+	ID               uint            `gorm:"primaryKey"               json:"id"`
+	FileID           uint            `gorm:"index;not null"           json:"file_id"` // foreign key to File
+	File             *File           `gorm:"foreignKey:FileID"        json:"file,omitempty"`
+	QualityProfileID uint            `gorm:"index;not null"           json:"quality_profile_id"` // foreign key to QualityProfile
+	QualityProfile   *QualityProfile `gorm:"foreignKey:QualityProfileID" json:"quality_profile,omitempty"`
+	Status           string          `gorm:"index"                    json:"status"` // queued, processing, done, failed
+	Priority         int             `gorm:"default:0"                json:"priority"`
+	ErrorMessage     string          `                                json:"error_message,omitempty"` // error details if status is failed
+	CreatedAt        time.Time       `                                json:"created_at"`
+	UpdatedAt        time.Time       `                                json:"updated_at"`
 }
 
 // TaskLog represents a log entry for a transcoding task.
@@ -115,8 +130,20 @@ func InitDB(workDir string, debug bool) (*gorm.DB, error) {
 	}
 
 	// Run migrations
-	if err := db.AutoMigrate(&File{}, &MediaInfo{}, &QueueItem{}, &TaskLog{}); err != nil {
+	if err := db.AutoMigrate(&File{}, &MediaInfo{}, &QualityProfile{}, &QueueItem{}, &TaskLog{}); err != nil {
 		return nil, fmt.Errorf("failed to migrate database: %w", err)
+	}
+
+	// Create default profile if no profiles exist
+	var count int64
+	if err := db.Model(&QualityProfile{}).Count(&count).Error; err != nil {
+		return nil, fmt.Errorf("failed to count quality profiles: %w", err)
+	}
+
+	if count == 0 {
+		if err := CreateDefaultProfile(db); err != nil {
+			return nil, fmt.Errorf("failed to create default profile: %w", err)
+		}
 	}
 
 	return db, nil
@@ -230,12 +257,149 @@ func IsEligibleForConversion(mediaInfo *MediaInfo) bool {
 	return false
 }
 
+// CreateOrUpdateQualityProfile creates a new quality profile or updates an existing one.
+func CreateOrUpdateQualityProfile(db *gorm.DB, profile *QualityProfile) error {
+	if profile == nil {
+		return errors.New("quality profile cannot be nil")
+	}
+
+	if profile.Name == "" {
+		return errors.New("quality profile name cannot be empty")
+	}
+
+	// Try to find existing profile by name
+	var existing QualityProfile
+	result := db.Where("name = ?", profile.Name).First(&existing)
+
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		// Create new record
+		if err := db.Create(profile).Error; err != nil {
+			return fmt.Errorf("failed to create quality profile: %w", err)
+		}
+		return nil
+	} else if result.Error != nil {
+		return fmt.Errorf("failed to query quality profile: %w", result.Error)
+	}
+
+	// Update existing record
+	profile.ID = existing.ID
+	if err := db.Save(profile).Error; err != nil {
+		return fmt.Errorf("failed to update quality profile: %w", err)
+	}
+
+	return nil
+}
+
+// GetQualityProfileByID retrieves a quality profile by its ID.
+func GetQualityProfileByID(db *gorm.DB, id uint) (*QualityProfile, error) {
+	var profile QualityProfile
+	result := db.Where("id = ?", id).First(&profile)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &profile, nil
+}
+
+// GetQualityProfileByName retrieves a quality profile by its name.
+func GetQualityProfileByName(db *gorm.DB, name string) (*QualityProfile, error) {
+	var profile QualityProfile
+	result := db.Where("name = ?", name).First(&profile)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &profile, nil
+}
+
+// GetAllQualityProfiles retrieves all quality profiles.
+func GetAllQualityProfiles(db *gorm.DB) ([]QualityProfile, error) {
+	var profiles []QualityProfile
+	result := db.Order("is_default DESC, name ASC").Find(&profiles)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return profiles, nil
+}
+
+// GetDefaultQualityProfile retrieves the default quality profile.
+func GetDefaultQualityProfile(db *gorm.DB) (*QualityProfile, error) {
+	var profile QualityProfile
+	result := db.Where("is_default = ?", true).First(&profile)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &profile, nil
+}
+
+// DeleteQualityProfile removes a quality profile by ID.
+func DeleteQualityProfile(db *gorm.DB, id uint) error {
+	// Check if profile is being used by any queue items
+	var count int64
+	if err := db.Model(&QueueItem{}).Where("quality_profile_id = ?", id).Count(&count).Error; err != nil {
+		return fmt.Errorf("failed to check queue items: %w", err)
+	}
+
+	if count > 0 {
+		return fmt.Errorf("cannot delete quality profile: %d queue items are using this profile", count)
+	}
+
+	// Check if this is the default profile
+	var profile QualityProfile
+	result := db.Where("id = ?", id).First(&profile)
+	if result.Error != nil {
+		return fmt.Errorf("failed to find quality profile: %w", result.Error)
+	}
+
+	if profile.IsDefault {
+		return errors.New("cannot delete the default quality profile")
+	}
+
+	if err := db.Delete(&QualityProfile{}, id).Error; err != nil {
+		return fmt.Errorf("failed to delete quality profile: %w", err)
+	}
+	return nil
+}
+
+// CreateDefaultProfile creates the default "Current Quality" profile that mimics existing auto-quality behavior.
+func CreateDefaultProfile(db *gorm.DB) error {
+	profile := &QualityProfile{
+		Name:              "Current Quality",
+		Description:       "Adaptive quality based on source bitrate (~50% reduction)",
+		Mode:              "vbr",
+		TargetBitrate:     0,
+		QualityLevel:      0,
+		BitrateMultiplier: 0.5,
+		IsDefault:         true,
+		CreatedAt:         time.Time{},
+		UpdatedAt:         time.Time{},
+	}
+
+	if err := db.Create(profile).Error; err != nil {
+		return fmt.Errorf("failed to create default profile: %w", err)
+	}
+
+	return nil
+}
+
 // AddToQueue adds a file to the transcoding queue.
 // Returns the queue item ID.
-func AddToQueue(db *gorm.DB, fileID uint, priority int) (uint, error) {
+func AddToQueue(db *gorm.DB, fileID uint, priority int, qualityProfileID uint) (uint, error) {
+	// Validate quality profile exists
+	if qualityProfileID == 0 {
+		return 0, errors.New("quality profile ID cannot be zero")
+	}
+
+	var profile QualityProfile
+	result := db.Where("id = ?", qualityProfileID).First(&profile)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return 0, fmt.Errorf("quality profile with ID %d not found", qualityProfileID)
+		}
+		return 0, fmt.Errorf("failed to validate quality profile: %w", result.Error)
+	}
+
 	// Check if already in queue (queued or processing)
 	var existing QueueItem
-	result := db.Where("file_id = ? AND status IN ?", fileID, []string{"queued", "processing"}).First(&existing)
+	result = db.Where("file_id = ? AND status IN ?", fileID, []string{"queued", "processing"}).First(&existing)
 
 	if result.Error == nil {
 		// Already in queue with active status
@@ -262,9 +426,13 @@ func AddToQueue(db *gorm.DB, fileID uint, priority int) (uint, error) {
 
 	// Add to queue
 	queueItem := &QueueItem{
-		FileID:   fileID,
-		Status:   "queued",
-		Priority: priority,
+		FileID:           fileID,
+		QualityProfileID: qualityProfileID,
+		Status:           "queued",
+		Priority:         priority,
+		ErrorMessage:     "",
+		CreatedAt:        time.Time{},
+		UpdatedAt:        time.Time{},
 	}
 
 	if err := db.Create(queueItem).Error; err != nil {
@@ -280,6 +448,7 @@ func GetNextQueueItem(db *gorm.DB) (*QueueItem, error) {
 	result := db.Where("status = ?", "queued").
 		Order("priority DESC, created_at ASC").
 		Preload("File").
+		Preload("QualityProfile").
 		First(&item)
 
 	if result.Error != nil {
@@ -309,7 +478,7 @@ func UpdateQueueItemStatus(db *gorm.DB, id uint, status string, errorMsg string)
 // GetQueueItems retrieves all queue items with optional status filter.
 func GetQueueItems(db *gorm.DB, status string) ([]QueueItem, error) {
 	var items []QueueItem
-	query := db.Preload("File")
+	query := db.Preload("File").Preload("QualityProfile")
 
 	if status != "" {
 		query = query.Where("status = ?", status)

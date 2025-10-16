@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/kjbreil/opti/internal/config"
+	"github.com/kjbreil/opti/internal/database"
 	"github.com/kjbreil/opti/internal/progress"
 )
 
@@ -21,11 +22,13 @@ const (
 )
 
 type QualityChoice struct {
-	CRF           int
-	ICQ           int
-	CQ            int
-	SourceBitrate int64
-	BitsPerPixel  float64
+	Mode          string  // "vbr" or "cbr"
+	TargetBitrate int64   // for CBR mode in bits per second
+	CRF           int     // for VBR mode (cpu/vaapi)
+	ICQ           int     // for VBR mode (qsv)
+	CQ            int     // for VBR mode (nvenc)
+	SourceBitrate int64   // source file bitrate for reference
+	BitsPerPixel  float64 // bits per pixel for quality estimation
 }
 
 type Job struct {
@@ -38,6 +41,86 @@ type Job struct {
 	Quality   QualityChoice
 }
 
+// DeriveQualityFromProfile derives quality settings from a quality profile.
+// This is the preferred method for quality selection when using profiles.
+// Parameters:
+//   - profile: The quality profile to use for encoding
+//   - info: Media information from the source file (used for adaptive quality in VBR with BitrateMultiplier)
+//
+// Returns a QualityChoice with appropriate mode (VBR or CBR) and parameters.
+func DeriveQualityFromProfile(profile *database.QualityProfile, info *ProbeInfo) QualityChoice {
+	if profile == nil {
+		// Fallback to default VBR quality if no profile provided
+		return DeriveQualityChoice(info, false)
+	}
+
+	var bitrate int64
+	var bpp float64
+	if info != nil {
+		bitrate = info.BitRate
+		if info.Width > 0 && info.Height > 0 && info.FPS > 0 && bitrate > 0 {
+			pixelsPerSecond := float64(info.Width*info.Height) * info.FPS
+			if pixelsPerSecond > 0 {
+				bpp = float64(bitrate) / pixelsPerSecond
+			}
+		}
+	}
+
+	switch profile.Mode {
+	case "cbr":
+		// Constant Bitrate mode - use profile's target bitrate
+		return QualityChoice{
+			Mode:          "cbr",
+			TargetBitrate: profile.TargetBitrate,
+			CRF:           0,
+			ICQ:           0,
+			CQ:            0,
+			SourceBitrate: bitrate,
+			BitsPerPixel:  bpp,
+		}
+
+	case "vbr":
+		// Variable Bitrate mode
+		var targetBitrate int64
+		if profile.BitrateMultiplier > 0 && bitrate > 0 {
+			// Calculate target from source bitrate using multiplier (e.g., 0.5 = 50% of source)
+			targetBitrate = int64(float64(bitrate) * profile.BitrateMultiplier)
+		}
+
+		// Determine quality level for VBR mode
+		qualityLevel := profile.QualityLevel
+		if qualityLevel == 0 {
+			// No explicit quality level, use heuristic based on source
+			qualityLevel, _ = estimateQualityLevel(info)
+		}
+
+		// Convert quality level to engine-specific parameters
+		// CRF (16-35): for cpu/vaapi - lower is better quality
+		// ICQ (1-51): for qsv - lower is better quality
+		// CQ (0-51): for nvenc - lower is better quality
+		crf := clampRange(qualityLevel, 16, 35)
+		icq := clampRange(qualityLevel-1, 1, 51)
+		cq := clampRange(qualityLevel-1, 0, 51)
+
+		return QualityChoice{
+			Mode:          "vbr",
+			TargetBitrate: targetBitrate, // Used for engines that support bitrate hints in VBR mode
+			CRF:           crf,           // For cpu/vaapi engines
+			ICQ:           icq,           // For qsv engine
+			CQ:            cq,            // For nvenc engine
+			SourceBitrate: bitrate,       // Reference for logging/stats
+			BitsPerPixel:  bpp,           // Reference for logging/stats
+		}
+
+	default:
+		// Unknown mode, fall back to VBR with heuristic
+		return DeriveQualityChoice(info, false)
+	}
+}
+
+// DeriveQualityChoice derives quality settings using the existing heuristic approach.
+// This function is kept for backward compatibility and creates a VBR quality choice.
+// For profile-based quality selection, use DeriveQualityFromProfile instead.
 func DeriveQualityChoice(info *ProbeInfo, fast bool) QualityChoice {
 	base := 22
 	var bpp float64
@@ -53,11 +136,13 @@ func DeriveQualityChoice(info *ProbeInfo, fast bool) QualityChoice {
 	icq := clampRange(base-1, 1, 51)
 	cq := clampRange(base-1, 0, 51)
 	return QualityChoice{
-		CRF:           crf,
-		ICQ:           icq,
-		CQ:            cq,
-		SourceBitrate: bitrate,
-		BitsPerPixel:  bpp,
+		Mode:          "vbr",   // Default to VBR mode for backward compatibility
+		TargetBitrate: 0,       // Not used in VBR mode
+		CRF:           crf,     // For cpu/vaapi engines
+		ICQ:           icq,     // For qsv engine
+		CQ:            cq,      // For nvenc engine
+		SourceBitrate: bitrate, // Reference for future calculations
+		BitsPerPixel:  bpp,     // Reference for quality estimation
 	}
 }
 
@@ -122,151 +207,208 @@ func clampRange(val, minVal, maxVal int) int {
 	return val
 }
 
+// buildCPUArgs builds ffmpeg arguments for CPU (libx265) encoding.
+func buildCPUArgs(job Job) []string {
+	args := []string{
+		"-hide_banner",
+		"-v", "error",
+		"-progress", "pipe:1",
+		"-i", job.Src,
+		"-map", "0",
+		"-c:v", "libx265",
+		"-preset", "medium",
+	}
+
+	// Add quality arguments based on mode
+	if job.Quality.Mode == "cbr" && job.Quality.TargetBitrate > 0 {
+		// CBR mode: use target bitrate
+		args = append(args, "-b:v", strconv.FormatInt(job.Quality.TargetBitrate, 10))
+	} else {
+		// VBR mode: use CRF
+		args = append(args, "-crf", strconv.Itoa(job.Quality.CRF))
+	}
+
+	// Add stream copy args
+	args = append(args, "-c:a", "copy", "-c:s", "copy")
+	return args
+}
+
+// buildQSVArgs builds ffmpeg arguments for Intel Quick Sync (QSV) encoding.
+func buildQSVArgs(job Job) []string {
+	args := []string{
+		"-hide_banner",
+		"-v", "error",
+		"-progress", "pipe:1",
+		"-hwaccel", "qsv",
+		"-c:v", "h264_qsv",
+		"-i", job.Src,
+		"-map", "0",
+		"-c:v", "hevc_qsv",
+		"-preset", "veryfast",
+	}
+
+	// Add quality arguments based on mode
+	if job.Quality.Mode == "cbr" && job.Quality.TargetBitrate > 0 {
+		// CBR mode: use target bitrate
+		args = append(args, "-b:v", strconv.FormatInt(job.Quality.TargetBitrate, 10))
+	} else {
+		// VBR mode: use global_quality (ICQ)
+		args = append(args, "-global_quality", strconv.Itoa(job.Quality.ICQ))
+	}
+
+	// Add stream copy args
+	args = append(args, "-c:a", "copy", "-c:s", "copy")
+	return args
+}
+
+// buildNVENCArgs builds ffmpeg arguments for NVIDIA NVENC encoding.
+func buildNVENCArgs(job Job) []string {
+	args := []string{
+		"-hide_banner",
+		"-v", "error",
+		"-progress", "pipe:1",
+		"-i", job.Src,
+		"-map", "0",
+		"-c:v", "hevc_nvenc",
+		"-preset", "medium",
+	}
+
+	// Add quality arguments based on mode
+	if job.Quality.Mode == "cbr" && job.Quality.TargetBitrate > 0 {
+		// CBR mode: use target bitrate with CBR rate control
+		args = append(args,
+			"-rc:v", "cbr",
+			"-b:v", strconv.FormatInt(job.Quality.TargetBitrate, 10),
+		)
+	} else {
+		// VBR mode: use CQ with VBR rate control
+		args = append(args,
+			"-rc:v", "vbr",
+			"-cq", strconv.Itoa(job.Quality.CQ),
+			"-b:v", "0",
+		)
+	}
+
+	// Add stream copy args
+	args = append(args, "-c:a", "copy", "-c:s", "copy")
+	return args
+}
+
+// buildVAAPIArgs builds ffmpeg arguments for VAAPI (Video Acceleration API) encoding.
+// Returns args, vaapiDriverName, and error. The vaapiDriverName should be set as LIBVA_DRIVER_NAME env var.
+func buildVAAPIArgs(cfg config.Config, job Job, workerID int, prog *progress.Prog) ([]string, string, error) {
+	// Validate and get device (uses default if not specified)
+	vaapiDevice, err := validateVAAPIDevice(cfg.VAAPIDevice)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// Update progress with device name
+	deviceName := filepath.Base(vaapiDevice)
+	prog.Update(workerID, func(r *progress.Row) { r.Device = deviceName })
+
+	// Detect GPU vendor and get appropriate driver name
+	var vaapiDriverName string
+	vendorID, vendorErr := detectGPUVendor(vaapiDevice)
+	if vendorErr != nil && cfg.Debug {
+		fmt.Fprintf(os.Stderr, "[worker %d] Warning: Could not detect GPU vendor: %v\n", workerID, vendorErr)
+	}
+
+	vaapiDriverName = getVAAPIDriverName(vendorID)
+	if cfg.Debug {
+		vendorName := getVendorName(vendorID)
+		if vaapiDriverName != "" {
+			fmt.Fprintf(os.Stderr, "[worker %d] VAAPI: Using %s GPU (%s) with driver %s on device %s\n",
+				workerID, vendorName, vendorID, vaapiDriverName, vaapiDevice)
+		} else {
+			fmt.Fprintf(os.Stderr, "[worker %d] VAAPI: Using %s GPU (%s) with auto-detected driver on device %s\n",
+				workerID, vendorName, vendorID, vaapiDevice)
+		}
+	}
+
+	args := []string{
+		"-hide_banner",
+		"-v", "error",
+		"-progress", "pipe:1",
+		"-vaapi_device", vaapiDevice,
+		"-i", job.Src,
+		"-map", "0",
+		"-vf", "format=nv12,hwupload",
+		"-c:v", "hevc_vaapi",
+	}
+
+	// Add quality arguments based on mode
+	if job.Quality.Mode == "cbr" && job.Quality.TargetBitrate > 0 {
+		// CBR mode: use target bitrate
+		args = append(args, "-b:v", strconv.FormatInt(job.Quality.TargetBitrate, 10))
+	} else {
+		// VBR mode: use qp (quantization parameter)
+		args = append(args, "-qp", strconv.Itoa(job.Quality.CRF))
+	}
+
+	// Add stream copy args
+	args = append(args, "-c:a", "copy", "-c:s", "copy")
+	return args, vaapiDriverName, nil
+}
+
+// buildVideoToolboxArgs builds ffmpeg arguments for Apple VideoToolbox encoding.
+func buildVideoToolboxArgs(job Job) []string {
+	args := []string{
+		"-hide_banner",
+		"-v", "error",
+		"-progress", "pipe:1",
+		"-i", job.Src,
+		"-map", "0",
+		"-c:v", "hevc_videotoolbox",
+	}
+
+	// Add quality arguments based on mode
+	if job.Quality.Mode == "cbr" && job.Quality.TargetBitrate > 0 {
+		// CBR mode: use target bitrate
+		args = append(args, "-b:v", strconv.FormatInt(job.Quality.TargetBitrate, 10))
+	} else if job.Quality.TargetBitrate > 0 {
+		// VBR mode with bitrate hint: use target bitrate (VideoToolbox handles as bitrate target, not strict CBR)
+		// This maintains the existing behavior of using 50% of source bitrate
+		args = append(args, "-b:v", strconv.FormatInt(job.Quality.TargetBitrate, 10))
+	} else {
+		// VBR mode with quality value: use -q:v
+		// VideoToolbox -q:v range is 0-100 (0 = best quality, 100 = worst)
+		qv := job.Quality.CRF * 2
+		if qv > 100 {
+			qv = 100
+		}
+		args = append(args, "-q:v", strconv.Itoa(qv))
+	}
+
+	// Add stream copy args
+	args = append(args, "-c:a", "copy", "-c:s", "copy")
+	return args
+}
+
 func Transcode(ctx context.Context, cfg config.Config, jb Job, workerID int, prog *progress.Prog, logFunc func(string)) error {
 	if err := os.MkdirAll(cfg.WorkDir, 0o750); err != nil {
 		return fmt.Errorf("failed to create work directory %s: %w", cfg.WorkDir, err)
 	}
 
-	// build args with -progress pipe:1 and quiet errors
+	// Build ffmpeg arguments based on selected encoding engine
 	var args []string
 	var vaapiDriverName string // LIBVA_DRIVER_NAME for VAAPI
+	var buildErr error
+
 	switch strings.ToLower(cfg.Engine) {
 	case "qsv":
-		args = []string{
-			"-hide_banner",
-			"-v", "error",
-			"-progress", "pipe:1",
-			// input
-			"-hwaccel", "qsv",
-			"-c:v", "h264_qsv",
-			"-i", jb.Src,
-			// mapping
-			"-map", "0",
-			// video
-			"-c:v", "hevc_qsv",
-			"-preset", "veryfast",
-		}
-		args = append(args,
-			"-global_quality", strconv.Itoa(jb.Quality.ICQ),
-		)
-		args = append(args,
-			"-c:a", "copy",
-			"-c:s", "copy",
-		)
+		args = buildQSVArgs(jb)
 	case "nvenc", "hevc_nvenc":
-		args = []string{
-			"-hide_banner",
-			"-v", "error",
-			"-progress", "pipe:1",
-			"-i", jb.Src,
-			"-map", "0",
-			"-c:v", "hevc_nvenc",
-			"-preset", "medium",
-		}
-		args = append(args,
-			"-rc:v", "vbr",
-			"-cq", strconv.Itoa(jb.Quality.CQ),
-			"-b:v", "0",
-		)
-		args = append(args,
-			"-c:a", "copy",
-			"-c:s", "copy",
-		)
+		args = buildNVENCArgs(jb)
 	case "vaapi", "hevc_vaapi":
-		// Validate and get device (uses default if not specified)
-		vaapiDevice, err := validateVAAPIDevice(cfg.VAAPIDevice)
-		if err != nil {
-			return err
+		args, vaapiDriverName, buildErr = buildVAAPIArgs(cfg, jb, workerID, prog)
+		if buildErr != nil {
+			return buildErr
 		}
-
-		// Update progress with device name
-		deviceName := filepath.Base(vaapiDevice)
-		prog.Update(workerID, func(r *progress.Row) { r.Device = deviceName })
-
-		// Detect GPU vendor and get appropriate driver name
-		vendorID, err := detectGPUVendor(vaapiDevice)
-		if err != nil && cfg.Debug {
-			fmt.Fprintf(os.Stderr, "[worker %d] Warning: Could not detect GPU vendor: %v\n", workerID, err)
-		}
-
-		vaapiDriverName = getVAAPIDriverName(vendorID)
-		if cfg.Debug {
-			vendorName := getVendorName(vendorID)
-			if vaapiDriverName != "" {
-				fmt.Fprintf(os.Stderr, "[worker %d] VAAPI: Using %s GPU (%s) with driver %s on device %s\n",
-					workerID, vendorName, vendorID, vaapiDriverName, vaapiDevice)
-			} else {
-				fmt.Fprintf(os.Stderr, "[worker %d] VAAPI: Using %s GPU (%s) with auto-detected driver on device %s\n",
-					workerID, vendorName, vendorID, vaapiDevice)
-			}
-		}
-
-		args = []string{
-			"-hide_banner",
-			"-v", "error",
-			"-progress", "pipe:1",
-			"-vaapi_device", vaapiDevice,
-			"-i", jb.Src,
-			"-map", "0",
-			"-vf", "format=nv12,hwupload",
-			"-c:v", "hevc_vaapi",
-		}
-		args = append(args,
-			"-qp", strconv.Itoa(jb.Quality.CRF),
-		)
-		args = append(args,
-			"-c:a", "copy",
-			"-c:s", "copy",
-		)
 	case "videotoolbox", "hevc_videotoolbox":
-		args = []string{
-			"-hide_banner",
-			"-v", "error",
-			"-progress", "pipe:1",
-			"-i", jb.Src,
-			"-map", "0",
-			"-c:v", "hevc_videotoolbox",
-		}
-		// Use 50% of source bitrate to achieve file size reduction with H.265
-		// H.265 is ~2x more efficient than H.264, so encoding at 50% bitrate
-		// maintains similar visual quality while reducing file size by ~50%
-		if jb.Quality.SourceBitrate > 0 {
-			targetBitrate := jb.Quality.SourceBitrate / 2
-			args = append(args,
-				"-b:v", strconv.FormatInt(targetBitrate, 10),
-			)
-		} else {
-			// Fallback to quality mode if source bitrate is unknown
-			// VideoToolbox -q:v range is 0-100 (0 = best quality, 100 = worst)
-			qv := jb.Quality.CRF * 2
-			if qv > 100 {
-				qv = 100
-			}
-			args = append(args,
-				"-q:v", strconv.Itoa(qv),
-			)
-		}
-		args = append(args,
-			"-c:a", "copy",
-			"-c:s", "copy",
-		)
+		args = buildVideoToolboxArgs(jb)
 	default:
-		args = []string{
-			"-hide_banner",
-			"-v", "error",
-			"-progress", "pipe:1",
-			"-i", jb.Src,
-			"-map", "0",
-			"-c:v", "libx265",
-			"-preset", "medium",
-		}
-		args = append(args,
-			"-crf", strconv.Itoa(jb.Quality.CRF),
-		)
-		args = append(args,
-			"-c:a", "copy",
-			"-c:s", "copy",
-		)
+		args = buildCPUArgs(jb)
 	}
 
 	if jb.Container == ContainerMP4 {

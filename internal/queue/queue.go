@@ -230,9 +230,32 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *d
 		BitRate:    mediaInfo.VideoBitrate,
 	}
 
-	// Determine quality and output container
-	quality := runner.DeriveQualityChoice(probeInfo, qp.cfg.FastMode)
-	qp.logAndBroadcast(item.ID, item.FileID, "info", fmt.Sprintf("Quality settings determined: %v", quality))
+	// Validate quality profile
+	if item.QualityProfile == nil {
+		errMsg := "quality profile not found for queue item"
+		qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
+		var updateErr error
+		if updateErr = database.UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg); updateErr != nil {
+			fmt.Fprintf(os.Stderr, "[worker %d] Failed to update queue item status: %v\n", workerID, updateErr)
+		}
+		qp.broadcastHTML(item.ID)
+		return
+	}
+
+	// Determine quality from profile
+	quality := runner.DeriveQualityFromProfile(item.QualityProfile, probeInfo)
+	qp.logAndBroadcast(
+		item.ID,
+		item.FileID,
+		"info",
+		fmt.Sprintf("Using quality profile: %s (%s: CRF=%d, ICQ=%d, CQ=%d, target=%d)",
+			item.QualityProfile.Name,
+			quality.Mode,
+			quality.CRF,
+			quality.ICQ,
+			quality.CQ,
+			quality.TargetBitrate),
+	)
 
 	container := "mkv"
 	faststart := false
@@ -350,7 +373,9 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *d
 
 // AddFileToQueue adds a file to the queue by path.
 // Returns the queue item ID.
-func (qp *QueueProcessor) AddFileToQueue(filePath string) (uint, error) {
+// If qualityProfileID is 0, uses the default profile.
+// If qualityProfileID is non-zero, validates that the profile exists.
+func (qp *QueueProcessor) AddFileToQueue(filePath string, qualityProfileID uint) (uint, error) {
 	// Get file from database
 	file, err := database.GetFileByPath(qp.db, filePath)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -361,7 +386,8 @@ func (qp *QueueProcessor) AddFileToQueue(filePath string) (uint, error) {
 	}
 
 	// Get media info and check eligibility
-	mediaInfo, err := database.GetMediaInfoByFileID(qp.db, file.ID)
+	var mediaInfo *database.MediaInfo
+	mediaInfo, err = database.GetMediaInfoByFileID(qp.db, file.ID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get media info: %w", err)
 	}
@@ -371,23 +397,73 @@ func (qp *QueueProcessor) AddFileToQueue(filePath string) (uint, error) {
 		return 0, fmt.Errorf("file is not eligible for conversion (codec: %s)", mediaInfo.VideoCodec)
 	}
 
+	// Determine quality profile to use
+	var profileID uint
+	if qualityProfileID == 0 {
+		// Get default quality profile
+		var profile *database.QualityProfile
+		profile, err = database.GetDefaultQualityProfile(qp.db)
+		if err != nil {
+			return 0, fmt.Errorf("failed to get default quality profile: %w", err)
+		}
+		profileID = profile.ID
+	} else {
+		// Validate that the specified profile exists
+		var profile *database.QualityProfile
+		profile, err = database.GetQualityProfileByID(qp.db, qualityProfileID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, fmt.Errorf("quality profile with ID %d not found", qualityProfileID)
+		}
+		if err != nil {
+			return 0, fmt.Errorf("failed to get quality profile: %w", err)
+		}
+		profileID = profile.ID
+	}
+
 	// Add to queue
-	return database.AddToQueue(qp.db, file.ID, 0)
+	return database.AddToQueue(qp.db, file.ID, 0, profileID)
 }
 
 // AddFolderToQueue adds all eligible files in a folder to the queue.
-func (qp *QueueProcessor) AddFolderToQueue(folderPath string) (int, error) {
+// If qualityProfileID is 0, uses the default profile.
+// If qualityProfileID is non-zero, validates that the profile exists.
+func (qp *QueueProcessor) AddFolderToQueue(folderPath string, qualityProfileID uint) (int, error) {
 	count := 0
+
+	// Determine quality profile to use
+	var profileID uint
+	var err error
+	if qualityProfileID == 0 {
+		// Get default quality profile
+		var profile *database.QualityProfile
+		profile, err = database.GetDefaultQualityProfile(qp.db)
+		if err != nil {
+			return 0, fmt.Errorf("failed to get default quality profile: %w", err)
+		}
+		profileID = profile.ID
+	} else {
+		// Validate that the specified profile exists
+		var profile *database.QualityProfile
+		profile, err = database.GetQualityProfileByID(qp.db, qualityProfileID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, fmt.Errorf("quality profile with ID %d not found", qualityProfileID)
+		}
+		if err != nil {
+			return 0, fmt.Errorf("failed to get quality profile: %w", err)
+		}
+		profileID = profile.ID
+	}
 
 	// Get all files in the folder from database
 	var files []database.File
-	if err := qp.db.Where("path LIKE ?", folderPath+"%").Find(&files).Error; err != nil {
+	if err = qp.db.Where("path LIKE ?", folderPath+"%").Find(&files).Error; err != nil {
 		return 0, fmt.Errorf("failed to query files: %w", err)
 	}
 
 	for _, file := range files {
 		// Get media info and check eligibility
-		mediaInfo, err := database.GetMediaInfoByFileID(qp.db, file.ID)
+		var mediaInfo *database.MediaInfo
+		mediaInfo, err = database.GetMediaInfoByFileID(qp.db, file.ID)
 		if err != nil {
 			continue
 		}
@@ -399,7 +475,7 @@ func (qp *QueueProcessor) AddFolderToQueue(folderPath string) (int, error) {
 
 		// Add to queue
 		var addErr error
-		if _, addErr = database.AddToQueue(qp.db, file.ID, 0); addErr == nil {
+		if _, addErr = database.AddToQueue(qp.db, file.ID, 0, profileID); addErr == nil {
 			count++
 		}
 	}

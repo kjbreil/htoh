@@ -101,6 +101,13 @@ func (s *Server) Start(ctx context.Context, port int) error {
 	mux.HandleFunc("/api/queue/delete", s.handleQueueDelete)
 	mux.HandleFunc("/api/queue/logs", s.handleQueueLogs)
 
+	// Quality profile routes
+	mux.HandleFunc("/api/profiles", s.handleProfiles)
+	mux.HandleFunc("/api/profiles/get", s.handleProfileGet)
+	mux.HandleFunc("/api/profiles/create", s.handleProfileCreate)
+	mux.HandleFunc("/api/profiles/update", s.handleProfileUpdate)
+	mux.HandleFunc("/api/profiles/delete", s.handleProfileDelete)
+
 	addr := fmt.Sprintf("0.0.0.0:%d", port)
 	server := &http.Server{
 		Addr:              addr,
@@ -355,10 +362,25 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 
 	path := r.FormValue("path")
 	isDir := r.FormValue("is_dir") == "true"
+	qualityProfileIDStr := r.FormValue("quality_profile_id")
 
 	if path == "" {
 		http.Error(w, "path is required", http.StatusBadRequest)
 		return
+	}
+
+	// Parse quality profile ID (0 = use default)
+	var qualityProfileID uint64
+	if qualityProfileIDStr != "" {
+		if _, err := fmt.Sscanf(qualityProfileIDStr, "%d", &qualityProfileID); err != nil {
+			http.Error(w, "invalid quality_profile_id", http.StatusBadRequest)
+			return
+		}
+		// Check for overflow when converting uint64 to uint
+		if qualityProfileID > uint64(^uint(0)) {
+			http.Error(w, "quality_profile_id too large", http.StatusBadRequest)
+			return
+		}
 	}
 
 	var count int
@@ -366,9 +388,9 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 	var queueItemID uint
 
 	if isDir {
-		count, err = s.queueProc.AddFolderToQueue(path)
+		count, err = s.queueProc.AddFolderToQueue(path, uint(qualityProfileID))
 	} else {
-		queueItemID, err = s.queueProc.AddFileToQueue(path)
+		queueItemID, err = s.queueProc.AddFileToQueue(path, uint(qualityProfileID))
 		if err == nil {
 			count = 1
 		}
@@ -603,5 +625,519 @@ func (s *Server) handleQueueItem(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	if err := s.templates.ExecuteTemplate(w, "queue-item.html", &item); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// handleProfiles returns all quality profiles.
+func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	profiles, err := database.GetAllQualityProfiles(s.db)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(profiles); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
+}
+
+// handleProfileGet returns a single profile by ID.
+func (s *Server) handleProfileGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	idStr := r.URL.Query().Get("id")
+	if idStr == "" {
+		http.Error(w, "id parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	var id uint64
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		http.Error(w, "invalid id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Check for overflow when converting uint64 to uint
+	if id > uint64(^uint(0)) {
+		http.Error(w, "id parameter too large", http.StatusBadRequest)
+		return
+	}
+
+	profile, err := database.GetQualityProfileByID(s.db, uint(id))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(profile); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
+}
+
+// handleProfileCreate creates a new quality profile.
+func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse form
+	name := r.FormValue("name")
+	description := r.FormValue("description")
+	mode := r.FormValue("mode")
+	targetBitrateStr := r.FormValue("target_bitrate")
+	qualityLevelStr := r.FormValue("quality_level")
+	bitrateMultiplierStr := r.FormValue("bitrate_multiplier")
+
+	// Validate required fields
+	if name == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "name is required",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	if mode != "vbr" && mode != "cbr" {
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "mode must be 'vbr' or 'cbr'",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Parse numeric fields
+	var targetBitrate int64
+	var qualityLevel int
+	var bitrateMultiplier float64
+	var err error
+
+	if targetBitrateStr != "" {
+		if _, err = fmt.Sscanf(targetBitrateStr, "%d", &targetBitrate); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "invalid target_bitrate",
+				"error":   "validation error",
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return
+		}
+	}
+
+	if qualityLevelStr != "" {
+		if _, err = fmt.Sscanf(qualityLevelStr, "%d", &qualityLevel); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "invalid quality_level",
+				"error":   "validation error",
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return
+		}
+	}
+
+	if bitrateMultiplierStr != "" {
+		if _, err = fmt.Sscanf(bitrateMultiplierStr, "%f", &bitrateMultiplier); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "invalid bitrate_multiplier",
+				"error":   "validation error",
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return
+		}
+	}
+
+	// Mode-specific validation
+	if mode == "cbr" && targetBitrate <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "target_bitrate must be greater than 0 for CBR mode",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	if mode == "vbr" && qualityLevel == 0 && bitrateMultiplier == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "at least one of quality_level or bitrate_multiplier must be set for VBR mode",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Create profile
+	profile := &database.QualityProfile{
+		Name:              name,
+		Description:       description,
+		Mode:              mode,
+		TargetBitrate:     targetBitrate,
+		QualityLevel:      qualityLevel,
+		BitrateMultiplier: bitrateMultiplier,
+		IsDefault:         false,
+	}
+
+	if err = database.CreateOrUpdateQualityProfile(s.db, profile); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "failed to create profile",
+			"error":   err.Error(),
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Profile created successfully",
+		"profile": profile,
+	}); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
+}
+
+// handleProfileUpdate updates an existing quality profile.
+func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse form
+	idStr := r.FormValue("id")
+	name := r.FormValue("name")
+	description := r.FormValue("description")
+	mode := r.FormValue("mode")
+	targetBitrateStr := r.FormValue("target_bitrate")
+	qualityLevelStr := r.FormValue("quality_level")
+	bitrateMultiplierStr := r.FormValue("bitrate_multiplier")
+	isDefaultStr := r.FormValue("is_default")
+
+	// Validate ID
+	if idStr == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "id is required",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	var id uint64
+	var err error
+	if _, err = fmt.Sscanf(idStr, "%d", &id); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "invalid id",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Check for overflow when converting uint64 to uint
+	if id > uint64(^uint(0)) {
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "id parameter too large",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Load existing profile
+	profile, err := database.GetQualityProfileByID(s.db, uint(id))
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "profile not found",
+			"error":   err.Error(),
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Update fields from form
+	if name != "" {
+		profile.Name = name
+	}
+	if description != "" {
+		profile.Description = description
+	}
+	if mode != "" {
+		if mode != "vbr" && mode != "cbr" {
+			w.WriteHeader(http.StatusBadRequest)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "mode must be 'vbr' or 'cbr'",
+				"error":   "validation error",
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return
+		}
+		profile.Mode = mode
+	}
+
+	if targetBitrateStr != "" {
+		var targetBitrate int64
+		if _, err = fmt.Sscanf(targetBitrateStr, "%d", &targetBitrate); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "invalid target_bitrate",
+				"error":   "validation error",
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return
+		}
+		profile.TargetBitrate = targetBitrate
+	}
+
+	if qualityLevelStr != "" {
+		var qualityLevel int
+		if _, err = fmt.Sscanf(qualityLevelStr, "%d", &qualityLevel); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "invalid quality_level",
+				"error":   "validation error",
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return
+		}
+		profile.QualityLevel = qualityLevel
+	}
+
+	if bitrateMultiplierStr != "" {
+		var bitrateMultiplier float64
+		if _, err = fmt.Sscanf(bitrateMultiplierStr, "%f", &bitrateMultiplier); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "invalid bitrate_multiplier",
+				"error":   "validation error",
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return
+		}
+		profile.BitrateMultiplier = bitrateMultiplier
+	}
+
+	// Handle is_default flag
+	if isDefaultStr == "true" {
+		// Unset other defaults first
+		if err = s.db.Model(&database.QualityProfile{}).
+			Where("is_default = ?", true).
+			Update("is_default", false).Error; err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "failed to unset other defaults",
+				"error":   err.Error(),
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return
+		}
+		profile.IsDefault = true
+	} else if isDefaultStr == "false" {
+		profile.IsDefault = false
+	}
+
+	// Mode-specific validation
+	if profile.Mode == "cbr" && profile.TargetBitrate <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "target_bitrate must be greater than 0 for CBR mode",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	if profile.Mode == "vbr" && profile.QualityLevel == 0 && profile.BitrateMultiplier == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "at least one of quality_level or bitrate_multiplier must be set for VBR mode",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Save profile
+	if err = database.CreateOrUpdateQualityProfile(s.db, profile); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "failed to update profile",
+			"error":   err.Error(),
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Profile updated successfully",
+		"profile": profile,
+	}); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
+}
+
+// handleProfileDelete deletes a quality profile.
+func (s *Server) handleProfileDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	idStr := r.FormValue("id")
+	if idStr == "" {
+		idStr = r.URL.Query().Get("id")
+	}
+
+	if idStr == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "id is required",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	var id uint64
+	var err error
+	if _, err = fmt.Sscanf(idStr, "%d", &id); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "invalid id",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Check for overflow when converting uint64 to uint
+	if id > uint64(^uint(0)) {
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "id parameter too large",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Delete profile
+	if err = database.DeleteQualityProfile(s.db, uint(id)); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "failed to delete profile",
+			"error":   err.Error(),
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Profile deleted successfully",
+	}); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
 	}
 }
