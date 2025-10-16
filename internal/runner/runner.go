@@ -296,36 +296,66 @@ func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, 
 			}
 		}
 
-		// Add to candidate list (for future transcoding feature)
-		// For now, we still track H.264 files as candidates
+		// Check if file is eligible for conversion and add to candidate list
 		if needsProbe && probeInfo != nil {
-			if strings.EqualFold(probeInfo.VideoCodec, "h264") || strings.EqualFold(probeInfo.VideoCodec, "avc") {
-				// Convert ProbeInfoDetailed to old ProbeInfo for candidate struct
-				oldProbeInfo := &ProbeInfo{
-					VideoCodec: probeInfo.VideoCodec,
-					Width:      probeInfo.Width,
-					Height:     probeInfo.Height,
-					FPS:        probeInfo.FPS,
-					BitRate:    probeInfo.VideoBitrate,
-				}
-				out = append(out, candidate{path: p, info: oldProbeInfo})
-				if debug {
-					fmt.Printf("[scan] queued candidate %s (codec=%s)\n", p, probeInfo.VideoCodec)
+			// Get MediaInfo for eligibility check
+			var mediaInfo *MediaInfo
+			mediaInfo, err = GetMediaInfoByFileID(db, existingFile.ID)
+			if err == nil {
+				// Check if file is eligible for conversion
+				if IsEligibleForConversion(mediaInfo) {
+					// If file was previously marked as done or failed, reset to discovered
+					// This allows re-transcoding when files are replaced or settings change
+					if existingFile.Status == "done" || existingFile.Status == "failed" {
+						existingFile.Status = "discovered"
+						if updateErr := CreateOrUpdateFile(db, existingFile); updateErr != nil && debug {
+							fmt.Printf("[scan] failed to reset status for %s: %v\n", p, updateErr)
+						} else if debug {
+							fmt.Printf("[scan] reset status to discovered for %s (was: done/failed, now eligible)\n", p)
+						}
+					}
+
+					// Convert to old ProbeInfo format for candidate struct
+					oldProbeInfo := &ProbeInfo{
+						VideoCodec: probeInfo.VideoCodec,
+						Width:      probeInfo.Width,
+						Height:     probeInfo.Height,
+						FPS:        probeInfo.FPS,
+						BitRate:    probeInfo.VideoBitrate,
+					}
+					out = append(out, candidate{path: p, info: oldProbeInfo})
+					if debug {
+						fmt.Printf("[scan] queued candidate %s (codec=%s)\n", p, probeInfo.VideoCodec)
+					}
 				}
 			}
 		} else if !needsProbe && existingFile != nil {
 			// Use cached data
 			var mediaInfo *MediaInfo
 			mediaInfo, err = GetMediaInfoByFileID(db, existingFile.ID)
-			if err == nil && (strings.EqualFold(mediaInfo.VideoCodec, "h264") || strings.EqualFold(mediaInfo.VideoCodec, "avc")) {
-				oldProbeInfo := &ProbeInfo{
-					VideoCodec: mediaInfo.VideoCodec,
-					Width:      mediaInfo.Width,
-					Height:     mediaInfo.Height,
-					FPS:        mediaInfo.FPS,
-					BitRate:    mediaInfo.VideoBitrate,
+			if err == nil {
+				// Check if file is eligible for conversion
+				if IsEligibleForConversion(mediaInfo) {
+					// If file was previously marked as done or failed, reset to discovered
+					if existingFile.Status == "done" || existingFile.Status == "failed" {
+						existingFile.Status = "discovered"
+						if updateErr := CreateOrUpdateFile(db, existingFile); updateErr != nil && debug {
+							fmt.Printf("[scan] failed to reset status for %s: %v\n", p, updateErr)
+						} else if debug {
+							fmt.Printf("[scan] reset status to discovered for %s (was: done/failed, now eligible)\n", p)
+						}
+					}
+
+					// Convert to old ProbeInfo format for candidate struct
+					oldProbeInfo := &ProbeInfo{
+						VideoCodec: mediaInfo.VideoCodec,
+						Width:      mediaInfo.Width,
+						Height:     mediaInfo.Height,
+						FPS:        mediaInfo.FPS,
+						BitRate:    mediaInfo.VideoBitrate,
+					}
+					out = append(out, candidate{path: p, info: oldProbeInfo})
 				}
-				out = append(out, candidate{path: p, info: oldProbeInfo})
 			}
 		}
 

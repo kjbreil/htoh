@@ -197,6 +197,32 @@ func GetMediaInfoByFileID(db *gorm.DB, fileID uint) (*MediaInfo, error) {
 	return &info, nil
 }
 
+// IsEligibleForConversion determines if a file is eligible for transcoding
+// based on its media info and current configuration.
+// Currently checks if the codec is H.264/AVC. Future enhancements can add
+// checks for bitrate, resolution, quality settings, etc.
+func IsEligibleForConversion(mediaInfo *MediaInfo) bool {
+	if mediaInfo == nil {
+		return false
+	}
+
+	// Currently, only H.264/AVC files are eligible for conversion to H.265/HEVC
+	if mediaInfo.VideoCodec == CodecH264 || mediaInfo.VideoCodec == CodecAVC {
+		return true
+	}
+
+	// Future: Add checks for H.265 files that need re-encoding
+	// - Bitrate too high
+	// - Quality settings changed
+	// - Resolution/encoding parameters changed
+	// Example:
+	// if mediaInfo.VideoCodec == CodecHEVC && mediaInfo.VideoBitrate > cfg.MaxBitrate {
+	//     return true
+	// }
+
+	return false
+}
+
 // AddToQueue adds a file to the transcoding queue.
 // Returns the queue item ID.
 func AddToQueue(db *gorm.DB, fileID uint, priority int) (uint, error) {

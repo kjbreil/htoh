@@ -205,9 +205,9 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 			mediaInfo.VideoCodec, mediaInfo.Width, mediaInfo.Height, mediaInfo.FPS, mediaInfo.VideoBitrate),
 	)
 
-	// Check if file is H.264/AVC
-	if mediaInfo.VideoCodec != CodecH264 && mediaInfo.VideoCodec != CodecAVC {
-		errMsg := fmt.Sprintf("file is not H.264/AVC (codec: %s)", mediaInfo.VideoCodec)
+	// Check if file is eligible for conversion
+	if !IsEligibleForConversion(mediaInfo) {
+		errMsg := fmt.Sprintf("file is not eligible for conversion (codec: %s)", mediaInfo.VideoCodec)
 		qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
 		var updateErr error
 		if updateErr = UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg); updateErr != nil {
@@ -356,21 +356,22 @@ func (qp *QueueProcessor) AddFileToQueue(filePath string) (uint, error) {
 		return 0, fmt.Errorf("failed to get file: %w", err)
 	}
 
-	// Check if file is H.264/AVC
+	// Get media info and check eligibility
 	mediaInfo, err := GetMediaInfoByFileID(qp.db, file.ID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get media info: %w", err)
 	}
 
-	if mediaInfo.VideoCodec != CodecH264 && mediaInfo.VideoCodec != CodecAVC {
-		return 0, fmt.Errorf("file is not H.264/AVC (codec: %s)", mediaInfo.VideoCodec)
+	// Check if file is eligible for conversion
+	if !IsEligibleForConversion(mediaInfo) {
+		return 0, fmt.Errorf("file is not eligible for conversion (codec: %s)", mediaInfo.VideoCodec)
 	}
 
 	// Add to queue
 	return AddToQueue(qp.db, file.ID, 0)
 }
 
-// AddFolderToQueue adds all H.264/AVC files in a folder to the queue.
+// AddFolderToQueue adds all eligible files in a folder to the queue.
 func (qp *QueueProcessor) AddFolderToQueue(folderPath string) (int, error) {
 	count := 0
 
@@ -381,13 +382,14 @@ func (qp *QueueProcessor) AddFolderToQueue(folderPath string) (int, error) {
 	}
 
 	for _, file := range files {
-		// Check if file is H.264/AVC
+		// Get media info and check eligibility
 		mediaInfo, err := GetMediaInfoByFileID(qp.db, file.ID)
 		if err != nil {
 			continue
 		}
 
-		if mediaInfo.VideoCodec != CodecH264 && mediaInfo.VideoCodec != CodecAVC {
+		// Check if file is eligible for conversion
+		if !IsEligibleForConversion(mediaInfo) {
 			continue
 		}
 
