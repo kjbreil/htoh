@@ -36,7 +36,7 @@ var (
 	silent       = flag.Bool("S", false, "Silent (less console output)")
 	workers      = flag.Int("j", 1, "Parallel workers")
 	scanInterval = flag.Int("scan-interval", 5, "Minutes between scans (0 = scan once and exit)")
-	engine       = flag.String("engine", "cpu", "Engine: cpu|qsv|nvenc|vaapi")
+	engine       = flag.String("engine", "cpu", "Engine: cpu|qsv|nvenc|vaapi|videotoolbox")
 	device       = flag.String("device", "", "Hardware device path for VAAPI (default: /dev/dri/renderD128)")
 	ffmpegPath   = flag.String("ffmpeg", "ffmpeg", "Path to ffmpeg binary")
 	ffprobePath  = flag.String(

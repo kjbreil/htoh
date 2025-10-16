@@ -119,10 +119,11 @@ func GenerateDefault(path string) error {
 
 # engine: Video encoding engine to use
 # Options:
-#   - "cpu"    : Software encoding with libx265 (slowest, best compatibility)
-#   - "qsv"    : Intel Quick Sync Video hardware acceleration
-#   - "nvenc"  : NVIDIA NVENC hardware acceleration
-#   - "vaapi"  : Video Acceleration API (Intel/AMD GPUs on Linux)
+#   - "cpu"         : Software encoding with libx265 (slowest, best compatibility)
+#   - "qsv"         : Intel Quick Sync Video hardware acceleration
+#   - "nvenc"       : NVIDIA NVENC hardware acceleration
+#   - "vaapi"       : Video Acceleration API (Intel/AMD GPUs on Linux)
+#   - "videotoolbox": Apple VideoToolbox hardware acceleration (macOS)
 # Default: "cpu"
 # engine = "cpu"
 
@@ -209,7 +210,11 @@ func GenerateDefault(path string) error {
 # vaapi_device = "/dev/dri/renderD128"
 # workers = 4
 
-# Example 5: Multiple source directories
+# Example 5: Apple Silicon or Intel Mac with VideoToolbox (macOS)
+# engine = "videotoolbox"
+# workers = 4
+
+# Example 6: Multiple source directories
 # source_dirs = ["/mnt/tv", "/mnt/movies", "/home/user/videos"]
 # work_dir = "/mnt/transcoded"
 # engine = "vaapi"

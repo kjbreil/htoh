@@ -518,6 +518,28 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 			"-c:a", "copy",
 			"-c:s", "copy",
 		)
+	case "videotoolbox", "hevc_videotoolbox":
+		args = []string{
+			"-hide_banner",
+			"-v", "error",
+			"-progress", "pipe:1",
+			"-i", jb.Src,
+			"-map", "0",
+			"-c:v", "hevc_videotoolbox",
+		}
+		// VideoToolbox uses -q:v with range 0-100 (lower = better quality)
+		// Map CRF to q:v by multiplying by 2 (CRF 25 -> q:v 50)
+		qv := jb.Quality.CRF * 2
+		if qv > 100 {
+			qv = 100
+		}
+		args = append(args,
+			"-q:v", strconv.Itoa(qv),
+		)
+		args = append(args,
+			"-c:a", "copy",
+			"-c:s", "copy",
+		)
 	default:
 		args = []string{
 			"-hide_banner",
