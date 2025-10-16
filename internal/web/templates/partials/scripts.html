@@ -26,6 +26,26 @@
             loadTree();
         });
 
+        // Function to trigger manual scan
+        function scanFiles() {
+            showNotification('Scanning files...', false);
+
+            fetch('/api/scan', {
+                method: 'POST'
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    // scan_complete event will handle the notification and tree reload
+                } else {
+                    showNotification('Error: ' + (data.message || 'Scan failed'), true);
+                }
+            })
+            .catch(err => {
+                showNotification('Error: ' + err.message, true);
+            });
+        }
+
         eventSource.addEventListener('profile_created', (e) => {
             const data = JSON.parse(e.data);
             showNotification('Profile created: ' + data.data.name);

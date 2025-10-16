@@ -22,6 +22,24 @@ type candidate struct {
 	info *runner.ProbeInfo
 }
 
+// ScanOnce performs a single scan of all source directories and returns the file count.
+// This function checks file sizes/modtimes and runs ffprobe if changes are detected.
+func ScanOnce(ctx context.Context, cfg config.Config, db *gorm.DB) (int, error) {
+	// Aggregate candidates from all source directories
+	var allFiles []candidate
+	var err error
+	for _, sourceDir := range cfg.SourceDirs {
+		var files []candidate
+		files, err = listCandidates(ctx, cfg.FFprobePath, sourceDir, db, cfg.Debug)
+		if err != nil {
+			return 0, err
+		}
+		allFiles = append(allFiles, files...)
+	}
+
+	return len(allFiles), nil
+}
+
 func Run(ctx context.Context, cfg config.Config) error {
 	if cfg.Workers <= 0 {
 		cfg.Workers = runtime.NumCPU()
@@ -50,19 +68,15 @@ func Run(ctx context.Context, cfg config.Config) error {
 			}
 		}
 
-		// Aggregate candidates from all source directories
-		var allFiles []candidate
-		for _, sourceDir := range cfg.SourceDirs {
-			var files []candidate
-			files, err = listCandidates(ctx, cfg.FFprobePath, sourceDir, db, cfg.Debug)
-			if err != nil {
-				return err
-			}
-			allFiles = append(allFiles, files...)
+		// Perform scan
+		var fileCount int
+		fileCount, err = ScanOnce(ctx, cfg, db)
+		if err != nil {
+			return err
 		}
 
 		if !cfg.Silent {
-			fmt.Printf("Found %d video file(s). Database updated.\n", len(allFiles))
+			fmt.Printf("Found %d video file(s). Database updated.\n", fileCount)
 		}
 
 		// Check if we should scan continuously or exit

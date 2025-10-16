@@ -16,6 +16,7 @@ import (
 	"github.com/kjbreil/opti/internal/config"
 	"github.com/kjbreil/opti/internal/database"
 	"github.com/kjbreil/opti/internal/queue"
+	"github.com/kjbreil/opti/internal/scanner"
 	"gorm.io/gorm"
 )
 
@@ -95,6 +96,7 @@ func (s *Server) Start(ctx context.Context, port int) error {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/tree", s.handleTree)
 	mux.HandleFunc("/api/convert", s.handleConvert)
+	mux.HandleFunc("/api/scan", s.handleScan)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/queue", s.handleQueue)
 	mux.HandleFunc("/api/queue/item", s.handleQueueItem)
@@ -107,6 +109,8 @@ func (s *Server) Start(ctx context.Context, port int) error {
 	mux.HandleFunc("/api/profiles/create", s.handleProfileCreate)
 	mux.HandleFunc("/api/profiles/update", s.handleProfileUpdate)
 	mux.HandleFunc("/api/profiles/delete", s.handleProfileDelete)
+	// RESTful routes with ID in path (must come after exact matches)
+	mux.HandleFunc("/api/profiles/", s.handleProfileByID)
 
 	addr := fmt.Sprintf("0.0.0.0:%d", port)
 	server := &http.Server{
@@ -414,6 +418,36 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"count":   count,
 		"message": fmt.Sprintf("Added %d file(s) to queue", count),
+	}); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
+}
+
+// handleScan triggers a manual scan of all source directories.
+func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Import scanner package
+	var fileCount int
+	var err error
+	fileCount, err = scanner.ScanOnce(r.Context(), s.cfg, s.db)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Broadcast scan complete event
+	s.broadcaster.BroadcastScanComplete(fileCount)
+
+	w.Header().Set("Content-Type", "application/json")
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":    true,
+		"file_count": fileCount,
+		"message":    fmt.Sprintf("Scan complete: %d files found", fileCount),
 	}); encodeErr != nil {
 		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
 	}
@@ -1137,6 +1171,308 @@ func (s *Server) handleProfileDelete(w http.ResponseWriter, r *http.Request) {
 	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"message": "Profile deleted successfully",
+	}); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
+}
+
+// handleProfileByID handles RESTful requests to /api/profiles/{id}.
+// Supports PUT (update) and DELETE (delete) methods with JSON bodies.
+func (s *Server) handleProfileByID(w http.ResponseWriter, r *http.Request) {
+	// Extract ID from URL path (e.g., /api/profiles/123 -> 123)
+	pathPrefix := "/api/profiles/"
+	if !strings.HasPrefix(r.URL.Path, pathPrefix) {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	idStr := strings.TrimPrefix(r.URL.Path, pathPrefix)
+	// Remove any trailing path segments (e.g., /api/profiles/123/default -> 123)
+	if idx := strings.Index(idStr, "/"); idx != -1 {
+		idStr = idStr[:idx]
+	}
+
+	if idStr == "" {
+		http.Error(w, "Profile ID is required", http.StatusBadRequest)
+		return
+	}
+
+	var id uint64
+	var err error
+	if _, err = fmt.Sscanf(idStr, "%d", &id); err != nil {
+		http.Error(w, "Invalid profile ID", http.StatusBadRequest)
+		return
+	}
+
+	// Check for overflow when converting uint64 to uint
+	if id > uint64(^uint(0)) {
+		http.Error(w, "Profile ID too large", http.StatusBadRequest)
+		return
+	}
+
+	profileID := uint(id)
+
+	// Route based on HTTP method
+	switch r.Method {
+	case http.MethodPut:
+		s.handleProfileUpdateJSON(w, r, profileID)
+	case http.MethodDelete:
+		s.handleProfileDeleteByID(w, r, profileID)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleProfileUpdateJSON handles PUT requests with JSON body to update a profile.
+func (s *Server) handleProfileUpdateJSON(w http.ResponseWriter, r *http.Request, profileID uint) {
+	// Parse JSON body
+	var reqData struct {
+		Name              string  `json:"name"`
+		Description       string  `json:"description"`
+		Mode              string  `json:"mode"`
+		TargetBitrateBPS  int64   `json:"target_bitrate_bps"`
+		Quality           int     `json:"quality"`
+		BitrateMultiplier float64 `json:"bitrate_multiplier"`
+		IsDefault         bool    `json:"is_default"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&reqData); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "Invalid JSON body",
+			"error":   err.Error(),
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Load existing profile
+	profile, err := database.GetQualityProfileByID(s.db, profileID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "Profile not found",
+			"error":   err.Error(),
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Update fields
+	if reqData.Name != "" {
+		profile.Name = reqData.Name
+	}
+	profile.Description = reqData.Description
+	if reqData.Mode != "" {
+		if reqData.Mode != "vbr" && reqData.Mode != "cbr" && reqData.Mode != "cbr_percent" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "mode must be 'vbr', 'cbr', or 'cbr_percent'",
+				"error":   "validation error",
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return
+		}
+		profile.Mode = reqData.Mode
+	}
+
+	profile.TargetBitrate = reqData.TargetBitrateBPS
+	profile.QualityLevel = reqData.Quality
+	profile.BitrateMultiplier = reqData.BitrateMultiplier
+
+	// Handle is_default flag
+	if reqData.IsDefault {
+		// Unset other defaults first
+		if err = s.db.Model(&database.QualityProfile{}).
+			Where("is_default = ?", true).
+			Update("is_default", false).Error; err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "failed to unset other defaults",
+				"error":   err.Error(),
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return
+		}
+	}
+	profile.IsDefault = reqData.IsDefault
+
+	// Mode-specific validation
+	if profile.Mode == "cbr" && profile.TargetBitrate <= 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "target_bitrate_bps must be greater than 0 for CBR mode",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Save profile
+	if err = database.CreateOrUpdateQualityProfile(s.db, profile); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "failed to update profile",
+			"error":   err.Error(),
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Profile updated successfully",
+		"profile": profile,
+	}); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
+}
+
+// handleProfileDeleteByID handles DELETE requests to delete a profile.
+func (s *Server) handleProfileDeleteByID(w http.ResponseWriter, r *http.Request, profileID uint) {
+	// Delete profile
+	if err := database.DeleteQualityProfile(s.db, profileID); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "failed to delete profile",
+			"error":   err.Error(),
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Profile deleted successfully",
+	}); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
+}
+
+// handleProfileSetDefault handles POST requests to set a profile as default.
+func (s *Server) handleProfileSetDefault(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract ID from URL path (e.g., /api/profiles/123/default -> 123)
+	pathPrefix := "/api/profiles/"
+	pathSuffix := "/default"
+	if !strings.HasPrefix(r.URL.Path, pathPrefix) || !strings.HasSuffix(r.URL.Path, pathSuffix) {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	idStr := strings.TrimPrefix(r.URL.Path, pathPrefix)
+	idStr = strings.TrimSuffix(idStr, pathSuffix)
+
+	if idStr == "" {
+		http.Error(w, "Profile ID is required", http.StatusBadRequest)
+		return
+	}
+
+	var id uint64
+	var err error
+	if _, err = fmt.Sscanf(idStr, "%d", &id); err != nil {
+		http.Error(w, "Invalid profile ID", http.StatusBadRequest)
+		return
+	}
+
+	// Check for overflow when converting uint64 to uint
+	if id > uint64(^uint(0)) {
+		http.Error(w, "Profile ID too large", http.StatusBadRequest)
+		return
+	}
+
+	profileID := uint(id)
+
+	// Load profile
+	profile, err := database.GetQualityProfileByID(s.db, profileID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "Profile not found",
+			"error":   err.Error(),
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Unset other defaults first
+	if err = s.db.Model(&database.QualityProfile{}).
+		Where("is_default = ?", true).
+		Update("is_default", false).Error; err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "failed to unset other defaults",
+			"error":   err.Error(),
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Set this profile as default
+	profile.IsDefault = true
+	if err = database.CreateOrUpdateQualityProfile(s.db, profile); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "failed to set default profile",
+			"error":   err.Error(),
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Default profile updated successfully",
 	}); encodeErr != nil {
 		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
 	}
