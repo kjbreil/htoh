@@ -557,11 +557,13 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 			"-map", "0",
 			"-c:v", "hevc_videotoolbox",
 		}
-		// Use source bitrate to preserve quality
-		// VideoToolbox will maintain similar quality at the target bitrate
+		// Use 50% of source bitrate to achieve file size reduction with H.265
+		// H.265 is ~2x more efficient than H.264, so encoding at 50% bitrate
+		// maintains similar visual quality while reducing file size by ~50%
 		if jb.Quality.SourceBitrate > 0 {
+			targetBitrate := jb.Quality.SourceBitrate / 2
 			args = append(args,
-				"-b:v", strconv.FormatInt(jb.Quality.SourceBitrate, 10),
+				"-b:v", strconv.FormatInt(targetBitrate, 10),
 			)
 		} else {
 			// Fallback to quality mode if source bitrate is unknown
