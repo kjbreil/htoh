@@ -161,14 +161,6 @@ func main() {
 		fmt.Println("Database initialized.")
 	}
 
-	// Create context for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Setup signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
 	// Create queue processor
 	queueProc := runner.NewQueueProcessor(db, cfg)
 
@@ -179,6 +171,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Setup signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
 	// Wait group for all goroutines
 	var wg sync.WaitGroup
 
@@ -186,8 +186,9 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := webServer.Start(ctx, *port); err != nil {
-			fmt.Fprintf(os.Stderr, "opti: web server error: %v\n", err)
+		var startErr error
+		if startErr = webServer.Start(ctx, *port); startErr != nil {
+			fmt.Fprintf(os.Stderr, "opti: web server error: %v\n", startErr)
 		}
 	}()
 
@@ -195,8 +196,9 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := queueProc.Start(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "opti: queue processor error: %v\n", err)
+		var procErr error
+		if procErr = queueProc.Start(ctx); procErr != nil {
+			fmt.Fprintf(os.Stderr, "opti: queue processor error: %v\n", procErr)
 		}
 	}()
 
@@ -204,8 +206,9 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := runner.Run(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
-			fmt.Fprintf(os.Stderr, "opti: scanner error: %v\n", err)
+		var runErr error
+		if runErr = runner.Run(ctx, cfg); runErr != nil && !errors.Is(runErr, context.Canceled) {
+			fmt.Fprintf(os.Stderr, "opti: scanner error: %v\n", runErr)
 		}
 	}()
 

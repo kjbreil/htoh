@@ -14,14 +14,14 @@ import (
 
 // File represents a video file on disk with its metadata.
 type File struct {
-	ID        uint      `gorm:"primaryKey"`
-	Path      string    `gorm:"uniqueIndex;not null"` // absolute path
-	Name      string    // filename
-	Size      int64     // file size in bytes
-	ModTime   time.Time // last modified time
-	Status    string    // queued, processing, done, failed
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID        uint      `gorm:"primaryKey"           json:"id"`
+	Path      string    `gorm:"uniqueIndex;not null" json:"path"`     // absolute path
+	Name      string    `                            json:"name"`     // filename
+	Size      int64     `                            json:"size"`     // file size in bytes
+	ModTime   time.Time `                            json:"mod_time"` // last modified time
+	Status    string    `                            json:"status"`   // queued, processing, done, failed
+	CreatedAt time.Time `                            json:"created_at"`
+	UpdatedAt time.Time `                            json:"updated_at"`
 }
 
 // MediaInfo stores ffprobe results, one-to-one with File.
@@ -60,33 +60,33 @@ type MediaInfo struct {
 
 // QueueItem represents a file in the transcoding queue.
 type QueueItem struct {
-	ID           uint   `gorm:"primaryKey"`
-	FileID       uint   `gorm:"index;not null"` // foreign key to File
-	File         *File  `gorm:"foreignKey:FileID"`
-	Status       string `gorm:"index"` // queued, processing, done, failed
-	Priority     int    `gorm:"default:0"`
-	QualityLevel int    `gorm:"default:0"` // for future use
-	ErrorMessage string // error details if status is failed
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID           uint      `gorm:"primaryKey"        json:"id"`
+	FileID       uint      `gorm:"index;not null"    json:"file_id"` // foreign key to File
+	File         *File     `gorm:"foreignKey:FileID" json:"file,omitempty"`
+	Status       string    `gorm:"index"             json:"status"` // queued, processing, done, failed
+	Priority     int       `gorm:"default:0"         json:"priority"`
+	QualityLevel int       `gorm:"default:0"         json:"quality_level"`           // for future use
+	ErrorMessage string    `                         json:"error_message,omitempty"` // error details if status is failed
+	CreatedAt    time.Time `                         json:"created_at"`
+	UpdatedAt    time.Time `                         json:"updated_at"`
 }
 
 // TaskLog represents a log entry for a transcoding task.
 type TaskLog struct {
-	ID          uint       `gorm:"primaryKey"`
-	QueueItemID uint       `gorm:"index;not null"` // foreign key to QueueItem
-	QueueItem   *QueueItem `gorm:"foreignKey:QueueItemID"`
-	FileID      uint       `gorm:"index;not null"` // foreign key to File (for easier queries)
-	File        *File      `gorm:"foreignKey:FileID"`
-	LogLevel    string     `gorm:"index"`     // info, warning, error
-	Message     string     `gorm:"type:text"` // log message
-	CreatedAt   time.Time
+	ID          uint       `gorm:"primaryKey"             json:"id"`
+	QueueItemID uint       `gorm:"index;not null"         json:"queue_item_id"` // foreign key to QueueItem
+	QueueItem   *QueueItem `gorm:"foreignKey:QueueItemID" json:"queue_item,omitempty"`
+	FileID      uint       `gorm:"index;not null"         json:"file_id"` // foreign key to File (for easier queries)
+	File        *File      `gorm:"foreignKey:FileID"      json:"file,omitempty"`
+	LogLevel    string     `gorm:"index"                  json:"log_level"` // info, warning, error
+	Message     string     `gorm:"type:text"              json:"message"`   // log message
+	CreatedAt   time.Time  `                              json:"created_at"`
 }
 
 // InitDB initializes the SQLite database with GORM.
 func InitDB(workDir string, debug bool) (*gorm.DB, error) {
 	// Create workDir if it doesn't exist
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
+	if err := os.MkdirAll(workDir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create work directory: %w", err)
 	}
 
@@ -218,7 +218,9 @@ func AddToQueue(db *gorm.DB, fileID uint, priority int) error {
 
 	if oldResult.Error == nil {
 		// Delete old record and its logs to ensure only one record per file
-		DeleteTaskLogsByQueueItem(db, oldRecord.ID)
+		if err := DeleteTaskLogsByQueueItem(db, oldRecord.ID); err != nil {
+			return fmt.Errorf("failed to delete task logs: %w", err)
+		}
 		if err := db.Delete(&oldRecord).Error; err != nil {
 			return fmt.Errorf("failed to delete old queue record: %w", err)
 		}

@@ -65,14 +65,17 @@ func NewServer(db *gorm.DB, cfg runner.Config, queueProc *runner.QueueProcessor)
 	// Set HTML broadcaster for queue item status updates
 	queueProc.SetHTMLBroadcaster(func(queueItemID uint) {
 		var item runner.QueueItem
-		if err := db.Preload("File").First(&item, queueItemID).Error; err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to load queue item for HTML render: %v\n", err)
+		var loadErr error
+		if loadErr = db.Preload("File").First(&item, queueItemID).Error; loadErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to load queue item for HTML render: %v\n", loadErr)
 			return
 		}
 
-		html, err := s.renderQueueItemHTML(&item)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to render queue item HTML: %v\n", err)
+		var html string
+		var renderErr error
+		html, renderErr = s.renderQueueItemHTML(&item)
+		if renderErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to render queue item HTML: %v\n", renderErr)
 			return
 		}
 
@@ -98,8 +101,9 @@ func (s *Server) Start(ctx context.Context, port int) error {
 
 	addr := fmt.Sprintf("0.0.0.0:%d", port)
 	server := &http.Server{
-		Addr:    addr,
-		Handler: mux,
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	// Graceful shutdown
@@ -107,7 +111,9 @@ func (s *Server) Start(ctx context.Context, port int) error {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		server.Shutdown(shutdownCtx)
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			fmt.Fprintf(os.Stderr, "Server shutdown error: %v\n", err)
+		}
 	}()
 
 	fmt.Printf("Web server starting on http://%s\n", addr)
@@ -119,7 +125,7 @@ func (s *Server) Start(ctx context.Context, port int) error {
 }
 
 // handleIndex serves the main page.
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 	if err := s.templates.ExecuteTemplate(w, "index.html", nil); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
@@ -165,7 +171,10 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(tree)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(tree); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
 		} else {
 			// Multiple source directories - return array of TreeNode
 			var trees []TreeNode
@@ -178,7 +187,10 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 				trees = append(trees, *tree)
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(trees)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(trees); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
 		}
 	} else {
 		// Specific path provided - return single TreeNode
@@ -188,7 +200,10 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(tree)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(tree); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
 	}
 }
 
@@ -197,7 +212,7 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 	// Get file info
 	info, err := os.Stat(rootPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to stat path %s: %w", rootPath, err)
 	}
 
 	root := &TreeNode{
@@ -208,13 +223,15 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 
 	if !info.IsDir() {
 		// Single file
-		file, err := runner.GetFileByPath(s.db, rootPath)
+		var file *runner.File
+		file, err = runner.GetFileByPath(s.db, rootPath)
 		if err == nil {
 			root.FileID = file.ID
 			root.Size = file.Size
 			root.Status = file.Status
 
-			mediaInfo, err := runner.GetMediaInfoByFileID(s.db, file.ID)
+			var mediaInfo *runner.MediaInfo
+			mediaInfo, err = runner.GetMediaInfoByFileID(s.db, file.ID)
 			if err == nil {
 				root.Codec = mediaInfo.VideoCodec
 			}
@@ -224,8 +241,9 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 
 	// Directory - get all files from database
 	var files []runner.File
-	if err := s.db.Where("path LIKE ?", rootPath+"%").Find(&files).Error; err != nil {
-		return nil, err
+	var dbErr error
+	if dbErr = s.db.Where("path LIKE ?", rootPath+"%").Find(&files).Error; dbErr != nil {
+		return nil, dbErr
 	}
 
 	// Build file map
@@ -237,7 +255,7 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 	// Walk directory structure
 	entries, err := os.ReadDir(rootPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read directory %s: %w", rootPath, err)
 	}
 
 	// Process entries
@@ -246,7 +264,8 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 
 		if entry.IsDir() {
 			// Recursive for directories
-			childNode, err := s.buildTree(childPath)
+			var childNode *TreeNode
+			childNode, err = s.buildTree(childPath)
 			if err != nil {
 				continue
 			}
@@ -269,7 +288,8 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 				childNode.Size = file.Size
 				childNode.Status = file.Status
 
-				mediaInfo, err := runner.GetMediaInfoByFileID(s.db, file.ID)
+				var mediaInfo *runner.MediaInfo
+				mediaInfo, err = runner.GetMediaInfoByFileID(s.db, file.ID)
 				if err == nil {
 					childNode.Codec = mediaInfo.VideoCodec
 				}
@@ -360,11 +380,14 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 	s.broadcaster.BroadcastQueueAdded(0, path)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"count":   count,
 		"message": fmt.Sprintf("Added %d file(s) to queue", count),
-	})
+	}); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
 }
 
 // handleEvents handles SSE connections.
@@ -410,7 +433,10 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(items)
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(items); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
 }
 
 // formatSize formats a byte size as human-readable string.
@@ -460,6 +486,12 @@ func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for overflow when converting uint64 to uint
+	if id > uint64(^uint(0)) {
+		http.Error(w, "id parameter too large", http.StatusBadRequest)
+		return
+	}
+
 	// Delete task logs first
 	if err := runner.DeleteTaskLogsByQueueItem(s.db, uint(id)); err != nil {
 		http.Error(w, fmt.Sprintf("failed to delete task logs: %v", err), http.StatusInternalServerError)
@@ -473,10 +505,12 @@ func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"message": "Queue item deleted successfully",
-	})
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", err)
+	}
 }
 
 // handleQueueLogs returns logs for a specific queue item.
@@ -494,6 +528,12 @@ func (s *Server) handleQueueLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for overflow when converting uint64 to uint
+	if id > uint64(^uint(0)) {
+		http.Error(w, "id parameter too large", http.StatusBadRequest)
+		return
+	}
+
 	// Get logs
 	logs, err := runner.GetTaskLogsByQueueItem(s.db, uint(id))
 	if err != nil {
@@ -502,7 +542,10 @@ func (s *Server) handleQueueLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(logs)
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(logs); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
 }
 
 // renderQueueItemHTML renders a queue item as HTML.
@@ -535,6 +578,12 @@ func (s *Server) handleQueueItem(w http.ResponseWriter, r *http.Request) {
 	var id uint64
 	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	// Check for overflow when converting uint64 to uint
+	if id > uint64(^uint(0)) {
+		http.Error(w, "id parameter too large", http.StatusBadRequest)
 		return
 	}
 

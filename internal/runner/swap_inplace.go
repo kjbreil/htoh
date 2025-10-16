@@ -40,23 +40,27 @@ func SwapInPlaceCopy(srcPath, newPath string, deleteOriginal bool) error {
 }
 
 func copyFileContents(from, to string) error {
-	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
-		return err
+	if err := os.MkdirAll(filepath.Dir(to), 0o750); err != nil {
+		return fmt.Errorf("failed to create directory for destination: %w", err)
 	}
+	// #nosec G304 - from path is controlled internally by the application (transcoded output file)
 	src, err := os.Open(from)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open source file: %w", err)
 	}
 	defer src.Close()
 
 	dst, err := os.Create(to)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create destination file: %w", err)
 	}
 	defer func() { _ = dst.Close() }()
 
 	if _, err = io.Copy(dst, src); err != nil {
-		return err
+		return fmt.Errorf("failed to copy file contents: %w", err)
 	}
-	return dst.Sync()
+	if err = dst.Sync(); err != nil {
+		return fmt.Errorf("failed to sync destination file: %w", err)
+	}
+	return nil
 }

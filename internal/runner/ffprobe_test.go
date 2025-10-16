@@ -367,7 +367,8 @@ func TestProbeIntegration(t *testing.T) {
 
 	// Check if test video file exists
 	testFile := "/mnt/cold/tv/Gen V/Season 1/Gen V - S01E03 - #ThinkBrink Bluray-1080p.mkv"
-	if _, err := os.Stat(testFile); os.IsNotExist(err) {
+	var statErr error
+	if _, statErr = os.Stat(testFile); os.IsNotExist(statErr) {
 		t.Skip("test video file not found, skipping integration test")
 	}
 

@@ -3,9 +3,14 @@ package runner
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
+)
+
+const (
+	defaultFFmpegBinary = "ffmpeg"
 )
 
 type EngineInfo struct {
@@ -17,7 +22,7 @@ type EngineInfo struct {
 // hardware encoders, and the engines that opti can use with the supplied ffmpeg binary.
 func PrintHardwareCaps(ffmpegPath string) error {
 	if ffmpegPath == "" {
-		ffmpegPath = "ffmpeg"
+		ffmpegPath = defaultFFmpegBinary
 	}
 	accels, err := runFFmpegCapture(ffmpegPath, "-hide_banner", "-hwaccels")
 	if err != nil {
@@ -54,7 +59,7 @@ func PrintHardwareCaps(ffmpegPath string) error {
 // EngineOptions returns the set of engines opti knows how to drive, filtered by ffmpeg support.
 func EngineOptions(ffmpegPath string) ([]EngineInfo, error) {
 	if ffmpegPath == "" {
-		ffmpegPath = "ffmpeg"
+		ffmpegPath = defaultFFmpegBinary
 	}
 	encoders, err := runFFmpegCapture(ffmpegPath, "-hide_banner", "-encoders")
 	if err != nil {
@@ -126,7 +131,8 @@ func engineOptionsFromEncoders(encoders string) []EngineInfo {
 
 func runFFmpegCapture(ffmpeg string, args ...string) (string, error) {
 	var stdout, stderr bytes.Buffer
-	cmd := exec.Command(ffmpeg, args...)
+	// #nosec G204 - ffmpeg path comes from validated config or defaults to "ffmpeg"
+	cmd := exec.CommandContext(context.Background(), ffmpeg, args...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

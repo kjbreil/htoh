@@ -99,6 +99,7 @@ func probe(ctx context.Context, ffprobePath, file string) (*ProbeInfoDetailed, e
 		file,
 	}
 	var stdout, stderr bytes.Buffer
+	// #nosec G204 - ffprobePath comes from validated config or defaults to "ffprobe"
 	cmd := exec.CommandContext(ctx, ffprobePath, args...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

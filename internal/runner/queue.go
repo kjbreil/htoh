@@ -64,7 +64,9 @@ func (qp *QueueProcessor) broadcastHTML(queueItemID uint) {
 // logAndBroadcast creates a task log and broadcasts it via SSE.
 func (qp *QueueProcessor) logAndBroadcast(queueItemID, fileID uint, logLevel, message string) {
 	// Create log in database
-	CreateTaskLog(qp.db, queueItemID, fileID, logLevel, message)
+	if err := CreateTaskLog(qp.db, queueItemID, fileID, logLevel, message); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create task log: %v\n", err)
+	}
 
 	// Broadcast via SSE if broadcaster is set
 	if qp.broadcaster != nil {
@@ -187,7 +189,10 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 	if err != nil {
 		errMsg := fmt.Sprintf("failed to get media info: %v", err)
 		qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
-		UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg)
+		var updateErr error
+		if updateErr = UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg); updateErr != nil {
+			fmt.Fprintf(os.Stderr, "[worker %d] Failed to update queue item status: %v\n", workerID, updateErr)
+		}
 		qp.broadcastHTML(item.ID)
 		return
 	}
@@ -201,10 +206,13 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 	)
 
 	// Check if file is H.264/AVC
-	if mediaInfo.VideoCodec != "h264" && mediaInfo.VideoCodec != "avc" {
+	if mediaInfo.VideoCodec != CodecH264 && mediaInfo.VideoCodec != CodecAVC {
 		errMsg := fmt.Sprintf("file is not H.264/AVC (codec: %s)", mediaInfo.VideoCodec)
 		qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
-		UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg)
+		var updateErr error
+		if updateErr = UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg); updateErr != nil {
+			fmt.Fprintf(os.Stderr, "[worker %d] Failed to update queue item status: %v\n", workerID, updateErr)
+		}
 		qp.broadcastHTML(item.ID)
 		return
 	}
@@ -225,10 +233,10 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 	container := "mkv"
 	faststart := false
 	if qp.cfg.ForceMP4 {
-		container = "mp4"
+		container = containerMP4
 		faststart = true
-	} else if qp.cfg.FaststartMP4 && mediaInfo.Container == "mp4" {
-		container = "mp4"
+	} else if qp.cfg.FaststartMP4 && mediaInfo.Container == containerMP4 {
+		container = containerMP4
 		faststart = true
 	}
 
@@ -293,17 +301,22 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 
 	// Transcode
 	qp.logAndBroadcast(item.ID, item.FileID, "info", "Starting transcoding...")
-	if err := transcode(ctx, qp.cfg, job, workerID, prog, func(msg string) {
+	var transcodeErr error
+	if transcodeErr = transcode(ctx, qp.cfg, job, workerID, prog, func(msg string) {
 		qp.logAndBroadcast(item.ID, item.FileID, "info", msg)
-	}); err != nil {
-		errMsg := fmt.Sprintf("transcoding failed: %v", err)
+	}); transcodeErr != nil {
+		errMsg := fmt.Sprintf("transcoding failed: %v", transcodeErr)
 		qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
-		UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg)
+		var updateErr error
+		if updateErr = UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg); updateErr != nil {
+			fmt.Fprintf(os.Stderr, "[worker %d] Failed to update queue item status: %v\n", workerID, updateErr)
+		}
 		qp.broadcastHTML(item.ID)
 
 		// Update file status
-		if err := qp.db.Model(&File{}).Where("id = ?", item.FileID).Update("status", "failed").Error; err != nil {
-			fmt.Fprintf(os.Stderr, "[worker %d] Failed to update file status: %v\n", workerID, err)
+		var fileErr error
+		if fileErr = qp.db.Model(&File{}).Where("id = ?", item.FileID).Update("status", "failed").Error; fileErr != nil {
+			fmt.Fprintf(os.Stderr, "[worker %d] Failed to update file status: %v\n", workerID, fileErr)
 		}
 		return
 	}
@@ -311,15 +324,17 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 	qp.logAndBroadcast(item.ID, item.FileID, "info", "Transcoding completed successfully")
 
 	// Mark as done
-	if err := UpdateQueueItemStatus(qp.db, item.ID, "done", ""); err != nil {
-		fmt.Fprintf(os.Stderr, "[worker %d] Failed to mark queue item as done: %v\n", workerID, err)
+	var doneErr error
+	if doneErr = UpdateQueueItemStatus(qp.db, item.ID, "done", ""); doneErr != nil {
+		fmt.Fprintf(os.Stderr, "[worker %d] Failed to mark queue item as done: %v\n", workerID, doneErr)
 		return
 	}
 	qp.broadcastHTML(item.ID)
 
 	// Update file status
-	if err := qp.db.Model(&File{}).Where("id = ?", item.FileID).Update("status", "done").Error; err != nil {
-		fmt.Fprintf(os.Stderr, "[worker %d] Failed to update file status: %v\n", workerID, err)
+	var statusErr error
+	if statusErr = qp.db.Model(&File{}).Where("id = ?", item.FileID).Update("status", "done").Error; statusErr != nil {
+		fmt.Fprintf(os.Stderr, "[worker %d] Failed to update file status: %v\n", workerID, statusErr)
 	}
 
 	qp.logAndBroadcast(item.ID, item.FileID, "info", "Task completed successfully")
@@ -346,7 +361,7 @@ func (qp *QueueProcessor) AddFileToQueue(filePath string) error {
 		return fmt.Errorf("failed to get media info: %w", err)
 	}
 
-	if mediaInfo.VideoCodec != "h264" && mediaInfo.VideoCodec != "avc" {
+	if mediaInfo.VideoCodec != CodecH264 && mediaInfo.VideoCodec != CodecAVC {
 		return fmt.Errorf("file is not H.264/AVC (codec: %s)", mediaInfo.VideoCodec)
 	}
 
@@ -371,12 +386,13 @@ func (qp *QueueProcessor) AddFolderToQueue(folderPath string) (int, error) {
 			continue
 		}
 
-		if mediaInfo.VideoCodec != "h264" && mediaInfo.VideoCodec != "avc" {
+		if mediaInfo.VideoCodec != CodecH264 && mediaInfo.VideoCodec != CodecAVC {
 			continue
 		}
 
 		// Add to queue
-		if err := AddToQueue(qp.db, file.ID, 0); err == nil {
+		var addErr error
+		if addErr = AddToQueue(qp.db, file.ID, 0); addErr == nil {
 			count++
 		}
 	}

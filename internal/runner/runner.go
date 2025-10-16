@@ -18,6 +18,10 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	containerMP4 = "mp4"
+)
+
 type Config struct {
 	SourceDirs   []string
 	WorkDir      string
@@ -110,7 +114,8 @@ func Run(ctx context.Context, cfg Config) error {
 		// Aggregate candidates from all source directories
 		var allFiles []candidate
 		for _, sourceDir := range cfg.SourceDirs {
-			files, err := listCandidates(ctx, cfg.FFprobePath, sourceDir, db, cfg.Debug)
+			var files []candidate
+			files, err = listCandidates(ctx, cfg.FFprobePath, sourceDir, db, cfg.Debug)
 			if err != nil {
 				return err
 			}
@@ -139,7 +144,7 @@ func Run(ctx context.Context, cfg Config) error {
 			if !cfg.Silent {
 				fmt.Println("\nShutdown requested. Exiting.")
 			}
-			return ctx.Err()
+			return fmt.Errorf("context cancelled during scan interval: %w", ctx.Err())
 		case <-time.After(time.Duration(cfg.ScanInterval) * time.Minute):
 			// Continue to next scan
 		}
@@ -188,28 +193,27 @@ func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, 
 		existingFile, err := GetFileByPath(db, p)
 		needsProbe := false
 
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
 			// New file
 			needsProbe = true
 			if debug {
 				fmt.Printf("[scan] new file: %s\n", p)
 			}
-		} else if err != nil {
+		case err != nil:
 			if debug {
 				fmt.Printf("[scan] db error for %s: %v\n", p, err)
 			}
 			return nil
-		} else {
+		default:
 			// File exists in DB, check if changed
 			if existingFile.Size != fileInfo.Size() || !existingFile.ModTime.Equal(fileInfo.ModTime()) {
 				needsProbe = true
 				if debug {
 					fmt.Printf("[scan] file changed: %s\n", p)
 				}
-			} else {
-				if debug {
-					fmt.Printf("[scan] file unchanged (cached): %s\n", p)
-				}
+			} else if debug {
+				fmt.Printf("[scan] file unchanged (cached): %s\n", p)
 			}
 		}
 
@@ -223,7 +227,8 @@ func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, 
 				fmt.Printf("[scan] probing %s\n", p)
 			}
 
-			pi, err := probe(ctx2, ffprobePath, p)
+			var pi *ProbeInfoDetailed
+			pi, err = probe(ctx2, ffprobePath, p)
 			if err != nil {
 				if debug {
 					fmt.Printf("[scan] ffprobe error for %s: %v\n", p, err)
@@ -250,9 +255,10 @@ func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, 
 				ModTime: fileInfo.ModTime(),
 				Status:  "discovered",
 			}
-			if err := CreateOrUpdateFile(db, file); err != nil {
+			var createErr error
+			if createErr = CreateOrUpdateFile(db, file); createErr != nil {
 				if debug {
-					fmt.Printf("[scan] db file update error for %s: %v\n", p, err)
+					fmt.Printf("[scan] db file update error for %s: %v\n", p, createErr)
 				}
 				return nil
 			}
@@ -282,9 +288,10 @@ func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, 
 				ColorRange:     probeInfo.ColorRange,
 				ColorPrimaries: probeInfo.ColorPrimaries,
 			}
-			if err := CreateOrUpdateMediaInfo(db, mediaInfo); err != nil {
+			var mediaErr error
+			if mediaErr = CreateOrUpdateMediaInfo(db, mediaInfo); mediaErr != nil {
 				if debug {
-					fmt.Printf("[scan] db media info update error for %s: %v\n", p, err)
+					fmt.Printf("[scan] db media info update error for %s: %v\n", p, mediaErr)
 				}
 			}
 		}
@@ -308,7 +315,8 @@ func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, 
 			}
 		} else if !needsProbe && existingFile != nil {
 			// Use cached data
-			mediaInfo, err := GetMediaInfoByFileID(db, existingFile.ID)
+			var mediaInfo *MediaInfo
+			mediaInfo, err = GetMediaInfoByFileID(db, existingFile.ID)
 			if err == nil && (strings.EqualFold(mediaInfo.VideoCodec, "h264") || strings.EqualFold(mediaInfo.VideoCodec, "avc")) {
 				oldProbeInfo := &ProbeInfo{
 					VideoCodec: mediaInfo.VideoCodec,
@@ -323,8 +331,11 @@ func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, 
 
 		return nil
 	})
+	if err != nil {
+		return out, fmt.Errorf("failed to walk directory %s: %w", root, err)
+	}
 
-	return out, err
+	return out, nil
 }
 
 func deriveQualityChoice(info *ProbeInfo, fast bool) qualityChoice {
@@ -401,19 +412,19 @@ func estimateQualityLevel(info *ProbeInfo) (int, float64) {
 	return 30, 0
 }
 
-func clampRange(val, min, max int) int {
-	if val < min {
-		return min
+func clampRange(val, minVal, maxVal int) int {
+	if val < minVal {
+		return minVal
 	}
-	if val > max {
-		return max
+	if val > maxVal {
+		return maxVal
 	}
 	return val
 }
 
 func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog, logFunc func(string)) error {
-	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
-		return err
+	if err := os.MkdirAll(cfg.WorkDir, 0o750); err != nil {
+		return fmt.Errorf("failed to create work directory %s: %w", cfg.WorkDir, err)
 	}
 
 	// build args with -progress pipe:1 and quiet errors
@@ -526,11 +537,11 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 		)
 	}
 
-	if jb.Container == "mp4" {
+	if jb.Container == containerMP4 {
 		if jb.Faststart {
 			args = append(args, "-movflags", "+faststart")
 		}
-		args = append(args, "-f", "mp4")
+		args = append(args, "-f", containerMP4)
 	}
 	args = append(args, jb.OutTarget)
 
@@ -558,6 +569,7 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 		return errors.New("ffmpeg path is empty - this should not happen")
 	}
 
+	// #nosec G204 - FFmpegPath is validated during config initialization and comes from config file or defaults to "ffmpeg"
 	cmd := exec.CommandContext(ctx, cfg.FFmpegPath, args...)
 
 	// Set LIBVA_DRIVER_NAME environment variable for VAAPI if needed
@@ -565,15 +577,18 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 		cmd.Env = append(os.Environ(), "LIBVA_DRIVER_NAME="+vaapiDriverName)
 	}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
+	var stdout io.ReadCloser
+	var pipeErr error
+	stdout, pipeErr = cmd.StdoutPipe()
+	if pipeErr != nil {
+		return fmt.Errorf("failed to create stdout pipe for ffmpeg: %w", pipeErr)
 	}
 	// keep stderr quiet; if needed, attach to os.Stderr
 	cmd.Stderr = io.Discard
 
-	if err := cmd.Start(); err != nil {
-		return err
+	var startErr error
+	if startErr = cmd.Start(); startErr != nil {
+		return fmt.Errorf("failed to start ffmpeg process: %w", startErr)
 	}
 
 	// Parse -progress lines
@@ -599,9 +614,7 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 					sb, _ := strconv.ParseInt(val, 10, 64)
 					prog.Update(workerID, func(r *Row) { r.SizeBytes = sb })
 				case "progress":
-					if val == "end" {
-						// leave loop; ffmpeg will exit shortly
-					}
+					// When val == "end", ffmpeg will exit shortly; no action needed
 				}
 			}
 		}
@@ -614,11 +627,12 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 		return readErr
 	}
 	if waitErr != nil {
-		return waitErr
+		return fmt.Errorf("ffmpeg process failed: %w", waitErr)
 	}
 	// Always swap in-place and delete the original backup
-	if err := SwapInPlaceCopy(jb.Src, jb.OutTarget, true); err != nil {
-		return err
+	var swapErr error
+	if swapErr = SwapInPlaceCopy(jb.Src, jb.OutTarget, true); swapErr != nil {
+		return swapErr
 	}
 	return nil
 }
@@ -679,6 +693,7 @@ func detectGPUVendor(device string) (string, error) {
 
 	// Read vendor ID from sysfs
 	vendorPath := filepath.Join("/sys/class/drm", devName, "device/vendor")
+	// #nosec G304 - vendorPath is constructed from system device paths under /sys/class/drm
 	vendorBytes, err := os.ReadFile(vendorPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read GPU vendor from %s: %w", vendorPath, err)
