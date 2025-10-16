@@ -198,18 +198,19 @@ func GetMediaInfoByFileID(db *gorm.DB, fileID uint) (*MediaInfo, error) {
 }
 
 // AddToQueue adds a file to the transcoding queue.
-func AddToQueue(db *gorm.DB, fileID uint, priority int) error {
+// Returns the queue item ID.
+func AddToQueue(db *gorm.DB, fileID uint, priority int) (uint, error) {
 	// Check if already in queue (queued or processing)
 	var existing QueueItem
 	result := db.Where("file_id = ? AND status IN ?", fileID, []string{"queued", "processing"}).First(&existing)
 
 	if result.Error == nil {
 		// Already in queue with active status
-		return nil
+		return existing.ID, nil
 	}
 
 	if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
-		return fmt.Errorf("failed to check queue: %w", result.Error)
+		return 0, fmt.Errorf("failed to check queue: %w", result.Error)
 	}
 
 	// Check if there's any completed or failed record for this file
@@ -219,10 +220,10 @@ func AddToQueue(db *gorm.DB, fileID uint, priority int) error {
 	if oldResult.Error == nil {
 		// Delete old record and its logs to ensure only one record per file
 		if err := DeleteTaskLogsByQueueItem(db, oldRecord.ID); err != nil {
-			return fmt.Errorf("failed to delete task logs: %w", err)
+			return 0, fmt.Errorf("failed to delete task logs: %w", err)
 		}
 		if err := db.Delete(&oldRecord).Error; err != nil {
-			return fmt.Errorf("failed to delete old queue record: %w", err)
+			return 0, fmt.Errorf("failed to delete old queue record: %w", err)
 		}
 	}
 
@@ -234,10 +235,10 @@ func AddToQueue(db *gorm.DB, fileID uint, priority int) error {
 	}
 
 	if err := db.Create(queueItem).Error; err != nil {
-		return fmt.Errorf("failed to add to queue: %w", err)
+		return 0, fmt.Errorf("failed to add to queue: %w", err)
 	}
 
-	return nil
+	return queueItem.ID, nil
 }
 
 // GetNextQueueItem retrieves the next item to process from the queue.

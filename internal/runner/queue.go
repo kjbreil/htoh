@@ -345,24 +345,25 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 }
 
 // AddFileToQueue adds a file to the queue by path.
-func (qp *QueueProcessor) AddFileToQueue(filePath string) error {
+// Returns the queue item ID.
+func (qp *QueueProcessor) AddFileToQueue(filePath string) (uint, error) {
 	// Get file from database
 	file, err := GetFileByPath(qp.db, filePath)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return fmt.Errorf("file not found in database: %s", filePath)
+		return 0, fmt.Errorf("file not found in database: %s", filePath)
 	}
 	if err != nil {
-		return fmt.Errorf("failed to get file: %w", err)
+		return 0, fmt.Errorf("failed to get file: %w", err)
 	}
 
 	// Check if file is H.264/AVC
 	mediaInfo, err := GetMediaInfoByFileID(qp.db, file.ID)
 	if err != nil {
-		return fmt.Errorf("failed to get media info: %w", err)
+		return 0, fmt.Errorf("failed to get media info: %w", err)
 	}
 
 	if mediaInfo.VideoCodec != CodecH264 && mediaInfo.VideoCodec != CodecAVC {
-		return fmt.Errorf("file is not H.264/AVC (codec: %s)", mediaInfo.VideoCodec)
+		return 0, fmt.Errorf("file is not H.264/AVC (codec: %s)", mediaInfo.VideoCodec)
 	}
 
 	// Add to queue
@@ -392,7 +393,7 @@ func (qp *QueueProcessor) AddFolderToQueue(folderPath string) (int, error) {
 
 		// Add to queue
 		var addErr error
-		if addErr = AddToQueue(qp.db, file.ID, 0); addErr == nil {
+		if _, addErr = AddToQueue(qp.db, file.ID, 0); addErr == nil {
 			count++
 		}
 	}

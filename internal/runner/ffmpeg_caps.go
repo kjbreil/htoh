@@ -104,9 +104,9 @@ func engineOptionsFromEncoders(encoders string) []EngineInfo {
 		{Name: "cpu", Description: "Software (libx265)"},
 	}
 	var (
-		hasQSV         bool
-		hasNVENC       bool
-		hasVAAPI       bool
+		hasQSV          bool
+		hasNVENC        bool
+		hasVAAPI        bool
 		hasVideoToolbox bool
 	)
 	for _, line := range filterHEVCHardwareEncoders(encoders) {

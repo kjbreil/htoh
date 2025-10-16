@@ -893,10 +893,10 @@
 
             let html = '<ul class="queue-list">';
             for (const item of items) {
-                const fileName = item.File ? item.File.Name : 'Unknown';
-                const status = item.Status || 'queued';
-                const error = item.ErrorMessage || '';
-                const itemId = item.ID;
+                const fileName = item.file ? item.file.name : 'Unknown';
+                const status = item.status || 'queued';
+                const error = item.error_message || '';
+                const itemId = item.id;
 
                 html += '<li class="queue-item" id="queue-item-' + itemId + '">';
 
@@ -1018,9 +1018,9 @@
 
             let html = '';
             for (const log of logs) {
-                const timestamp = new Date(log.CreatedAt).toLocaleTimeString();
-                const level = log.LogLevel || 'info';
-                const message = log.Message || '';
+                const timestamp = new Date(log.created_at).toLocaleTimeString();
+                const level = log.log_level || 'info';
+                const message = log.message || '';
 
                 html += '<div class="log-entry ' + level + '">';
                 html += '<span class="log-timestamp">' + timestamp + '</span>';

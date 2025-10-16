@@ -361,11 +361,12 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 
 	var count int
 	var err error
+	var queueItemID uint
 
 	if isDir {
 		count, err = s.queueProc.AddFolderToQueue(path)
 	} else {
-		err = s.queueProc.AddFileToQueue(path)
+		queueItemID, err = s.queueProc.AddFileToQueue(path)
 		if err == nil {
 			count = 1
 		}
@@ -376,8 +377,12 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Broadcast event
-	s.broadcaster.BroadcastQueueAdded(0, path)
+	// Broadcast event - for single files use the actual queue item ID
+	if !isDir && queueItemID > 0 {
+		s.broadcaster.BroadcastQueueAdded(queueItemID, path)
+	} else {
+		s.broadcaster.BroadcastQueueAdded(0, path)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	var encodeErr error
