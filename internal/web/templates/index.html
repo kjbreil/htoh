@@ -240,17 +240,41 @@
             to { transform: rotate(360deg); }
         }
 
-        .notification {
+        #notifications {
             position: fixed;
             top: 20px;
             right: 20px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            pointer-events: none;
+        }
+
+        .notification {
+            position: relative;
             background: #0f0f0f;
             border: 1px solid #4a9eff;
             padding: 15px 20px;
             border-radius: 2px;
             box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-            z-index: 1000;
             max-width: 400px;
+            pointer-events: auto;
+            opacity: 0;
+            transform: translateX(100px);
+            transition: opacity 0.3s ease, transform 0.3s ease;
+        }
+
+        .notification.show {
+            opacity: 1;
+            transform: translateX(0);
+        }
+
+        .notification.hide {
+            opacity: 0;
+            transform: translateX(100px);
+            margin-top: -80px;
+            transition: opacity 0.3s ease, transform 0.3s ease, margin-top 0.3s ease;
         }
 
         .folder-stats {
@@ -789,9 +813,21 @@
             notif.textContent = message;
             container.appendChild(notif);
 
+            // Trigger fade-in animation
             setTimeout(() => {
-                notif.remove();
-            }, 5000);
+                notif.classList.add('show');
+            }, 10);
+
+            // Start fade-out after 4.7 seconds
+            setTimeout(() => {
+                notif.classList.add('hide');
+                notif.classList.remove('show');
+
+                // Remove from DOM after animation completes
+                setTimeout(() => {
+                    notif.remove();
+                }, 300);
+            }, 4700);
         }
 
         function escapeHtml(text) {
