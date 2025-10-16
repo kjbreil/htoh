@@ -527,15 +527,23 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 			"-map", "0",
 			"-c:v", "hevc_videotoolbox",
 		}
-		// VideoToolbox uses -q:v with range 0-100 (lower = better quality)
-		// Map CRF to q:v by multiplying by 2 (CRF 25 -> q:v 50)
-		qv := jb.Quality.CRF * 2
-		if qv > 100 {
-			qv = 100
+		// Use source bitrate to preserve quality
+		// VideoToolbox will maintain similar quality at the target bitrate
+		if jb.Quality.SourceBitrate > 0 {
+			args = append(args,
+				"-b:v", strconv.FormatInt(jb.Quality.SourceBitrate, 10),
+			)
+		} else {
+			// Fallback to quality mode if source bitrate is unknown
+			// VideoToolbox -q:v range is 0-100 (0 = best quality, 100 = worst)
+			qv := jb.Quality.CRF * 2
+			if qv > 100 {
+				qv = 100
+			}
+			args = append(args,
+				"-q:v", strconv.Itoa(qv),
+			)
 		}
-		args = append(args,
-			"-q:v", strconv.Itoa(qv),
-		)
 		args = append(args,
 			"-c:a", "copy",
 			"-c:s", "copy",
