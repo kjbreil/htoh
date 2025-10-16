@@ -6,7 +6,7 @@ import (
 	"sync"
 )
 
-// EventType represents different types of SSE events
+// EventType represents different types of SSE events.
 type EventType string
 
 const (
@@ -19,33 +19,33 @@ const (
 	EventQueueItemHTML  EventType = "queue_item_html"
 )
 
-// Event represents a server-sent event
+// Event represents a server-sent event.
 type Event struct {
 	Type EventType   `json:"type"`
 	Data interface{} `json:"data"`
 }
 
-// EventBroadcaster manages SSE connections and broadcasts events
+// EventBroadcaster manages SSE connections and broadcasts events.
 type EventBroadcaster struct {
 	mu      sync.RWMutex
 	clients map[chan Event]bool
 }
 
-// NewEventBroadcaster creates a new event broadcaster
+// NewEventBroadcaster creates a new event broadcaster.
 func NewEventBroadcaster() *EventBroadcaster {
 	return &EventBroadcaster{
 		clients: make(map[chan Event]bool),
 	}
 }
 
-// Register adds a new client channel
+// Register adds a new client channel.
 func (eb *EventBroadcaster) Register(client chan Event) {
 	eb.mu.Lock()
 	defer eb.mu.Unlock()
 	eb.clients[client] = true
 }
 
-// Unregister removes a client channel
+// Unregister removes a client channel.
 func (eb *EventBroadcaster) Unregister(client chan Event) {
 	eb.mu.Lock()
 	defer eb.mu.Unlock()
@@ -53,7 +53,7 @@ func (eb *EventBroadcaster) Unregister(client chan Event) {
 	close(client)
 }
 
-// Broadcast sends an event to all connected clients
+// Broadcast sends an event to all connected clients.
 func (eb *EventBroadcaster) Broadcast(event Event) {
 	eb.mu.RLock()
 	defer eb.mu.RUnlock()
@@ -68,7 +68,7 @@ func (eb *EventBroadcaster) Broadcast(event Event) {
 	}
 }
 
-// BroadcastQueueAdded broadcasts a queue added event
+// BroadcastQueueAdded broadcasts a queue added event.
 func (eb *EventBroadcaster) BroadcastQueueAdded(fileID uint, fileName string) {
 	eb.Broadcast(Event{
 		Type: EventQueueAdded,
@@ -79,7 +79,7 @@ func (eb *EventBroadcaster) BroadcastQueueAdded(fileID uint, fileName string) {
 	})
 }
 
-// BroadcastQueueUpdated broadcasts a queue updated event
+// BroadcastQueueUpdated broadcasts a queue updated event.
 func (eb *EventBroadcaster) BroadcastQueueUpdated(queueID uint, fileID uint, status string) {
 	eb.Broadcast(Event{
 		Type: EventQueueUpdated,
@@ -91,7 +91,7 @@ func (eb *EventBroadcaster) BroadcastQueueUpdated(queueID uint, fileID uint, sta
 	})
 }
 
-// BroadcastStatusChanged broadcasts a status change event
+// BroadcastStatusChanged broadcasts a status change event.
 func (eb *EventBroadcaster) BroadcastStatusChanged(fileID uint, oldStatus, newStatus string) {
 	eb.Broadcast(Event{
 		Type: EventStatusChanged,
@@ -103,7 +103,7 @@ func (eb *EventBroadcaster) BroadcastStatusChanged(fileID uint, oldStatus, newSt
 	})
 }
 
-// BroadcastScanComplete broadcasts a scan complete event
+// BroadcastScanComplete broadcasts a scan complete event.
 func (eb *EventBroadcaster) BroadcastScanComplete(fileCount int) {
 	eb.Broadcast(Event{
 		Type: EventScanComplete,
@@ -113,7 +113,7 @@ func (eb *EventBroadcaster) BroadcastScanComplete(fileCount int) {
 	})
 }
 
-// BroadcastTaskLog broadcasts a task log event
+// BroadcastTaskLog broadcasts a task log event.
 func (eb *EventBroadcaster) BroadcastTaskLog(queueItemID, fileID uint, logLevel, message string, timestamp string) {
 	eb.Broadcast(Event{
 		Type: EventTaskLog,
@@ -127,8 +127,15 @@ func (eb *EventBroadcaster) BroadcastTaskLog(queueItemID, fileID uint, logLevel,
 	})
 }
 
-// BroadcastProgressUpdate broadcasts a transcoding progress update event
-func (eb *EventBroadcaster) BroadcastProgressUpdate(queueItemID, fileID uint, fps float64, speed string, outTimeS float64, sizeBytes int64, device string) {
+// BroadcastProgressUpdate broadcasts a transcoding progress update event.
+func (eb *EventBroadcaster) BroadcastProgressUpdate(
+	queueItemID, fileID uint,
+	fps float64,
+	speed string,
+	outTimeS float64,
+	sizeBytes int64,
+	device string,
+) {
 	eb.Broadcast(Event{
 		Type: EventProgressUpdate,
 		Data: map[string]interface{}{
@@ -143,7 +150,7 @@ func (eb *EventBroadcaster) BroadcastProgressUpdate(queueItemID, fileID uint, fp
 	})
 }
 
-// BroadcastQueueItemHTML broadcasts an HTML fragment for a queue item
+// BroadcastQueueItemHTML broadcasts an HTML fragment for a queue item.
 func (eb *EventBroadcaster) BroadcastQueueItemHTML(queueItemID uint, html string) {
 	eb.Broadcast(Event{
 		Type: EventQueueItemHTML,
@@ -154,7 +161,7 @@ func (eb *EventBroadcaster) BroadcastQueueItemHTML(queueItemID uint, html string
 	})
 }
 
-// FormatSSE formats an event as SSE format
+// FormatSSE formats an event as SSE format.
 func FormatSSE(event Event) string {
 	data, err := json.Marshal(event)
 	if err != nil {

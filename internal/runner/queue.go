@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,13 +12,20 @@ import (
 	"gorm.io/gorm"
 )
 
-// LogBroadcaster is an interface for broadcasting log events
+// LogBroadcaster is an interface for broadcasting log events.
 type LogBroadcaster interface {
 	BroadcastTaskLog(queueItemID, fileID uint, logLevel, message string, timestamp string)
-	BroadcastProgressUpdate(queueItemID, fileID uint, fps float64, speed string, outTimeS float64, sizeBytes int64, device string)
+	BroadcastProgressUpdate(
+		queueItemID, fileID uint,
+		fps float64,
+		speed string,
+		outTimeS float64,
+		sizeBytes int64,
+		device string,
+	)
 }
 
-// QueueProcessor manages the transcoding queue
+// QueueProcessor manages the transcoding queue.
 type QueueProcessor struct {
 	db              *gorm.DB
 	cfg             Config
@@ -27,7 +35,7 @@ type QueueProcessor struct {
 	htmlBroadcaster func(uint)
 }
 
-// NewQueueProcessor creates a new queue processor
+// NewQueueProcessor creates a new queue processor.
 func NewQueueProcessor(db *gorm.DB, cfg Config) *QueueProcessor {
 	return &QueueProcessor{
 		db:     db,
@@ -36,24 +44,24 @@ func NewQueueProcessor(db *gorm.DB, cfg Config) *QueueProcessor {
 	}
 }
 
-// SetBroadcaster sets the log broadcaster for SSE events
+// SetBroadcaster sets the log broadcaster for SSE events.
 func (qp *QueueProcessor) SetBroadcaster(broadcaster LogBroadcaster) {
 	qp.broadcaster = broadcaster
 }
 
-// SetHTMLBroadcaster sets the HTML broadcaster for queue item updates
+// SetHTMLBroadcaster sets the HTML broadcaster for queue item updates.
 func (qp *QueueProcessor) SetHTMLBroadcaster(fn func(uint)) {
 	qp.htmlBroadcaster = fn
 }
 
-// broadcastHTML broadcasts an HTML update for a queue item
+// broadcastHTML broadcasts an HTML update for a queue item.
 func (qp *QueueProcessor) broadcastHTML(queueItemID uint) {
 	if qp.htmlBroadcaster != nil {
 		qp.htmlBroadcaster(queueItemID)
 	}
 }
 
-// logAndBroadcast creates a task log and broadcasts it via SSE
+// logAndBroadcast creates a task log and broadcasts it via SSE.
 func (qp *QueueProcessor) logAndBroadcast(queueItemID, fileID uint, logLevel, message string) {
 	// Create log in database
 	CreateTaskLog(qp.db, queueItemID, fileID, logLevel, message)
@@ -64,14 +72,14 @@ func (qp *QueueProcessor) logAndBroadcast(queueItemID, fileID uint, logLevel, me
 	}
 }
 
-// Start begins processing the queue
+// Start begins processing the queue.
 func (qp *QueueProcessor) Start(ctx context.Context) error {
 	// Create a worker pool
 	jobs := make(chan *QueueItem, qp.cfg.Workers*2)
 	var wg sync.WaitGroup
 
 	// Start workers
-	for i := 0; i < qp.cfg.Workers; i++ {
+	for i := range qp.cfg.Workers {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
@@ -100,11 +108,11 @@ func (qp *QueueProcessor) Start(ctx context.Context) error {
 	return nil
 }
 
-// feedQueue feeds items from the database into the job channel
+// feedQueue feeds items from the database into the job channel.
 func (qp *QueueProcessor) feedQueue(jobs chan<- *QueueItem) {
 	// Get next queued item
 	item, err := GetNextQueueItem(qp.db)
-	if err == gorm.ErrRecordNotFound {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		// No items in queue
 		return
 	}
@@ -136,7 +144,7 @@ func (qp *QueueProcessor) feedQueue(jobs chan<- *QueueItem) {
 	}
 }
 
-// worker processes jobs from the queue
+// worker processes jobs from the queue.
 func (qp *QueueProcessor) worker(ctx context.Context, workerID int, jobs <-chan *QueueItem) {
 	for {
 		select {
@@ -151,7 +159,7 @@ func (qp *QueueProcessor) worker(ctx context.Context, workerID int, jobs <-chan 
 	}
 }
 
-// processItem processes a single queue item
+// processItem processes a single queue item.
 func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *QueueItem) {
 	defer func() {
 		qp.mu.Lock()
@@ -184,8 +192,13 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 		return
 	}
 
-	qp.logAndBroadcast(item.ID, item.FileID, "info", fmt.Sprintf("Media info retrieved: codec=%s, resolution=%dx%d, fps=%.2f, bitrate=%d",
-		mediaInfo.VideoCodec, mediaInfo.Width, mediaInfo.Height, mediaInfo.FPS, mediaInfo.VideoBitrate))
+	qp.logAndBroadcast(
+		item.ID,
+		item.FileID,
+		"info",
+		fmt.Sprintf("Media info retrieved: codec=%s, resolution=%dx%d, fps=%.2f, bitrate=%d",
+			mediaInfo.VideoCodec, mediaInfo.Width, mediaInfo.Height, mediaInfo.FPS, mediaInfo.VideoBitrate),
+	)
 
 	// Check if file is H.264/AVC
 	if mediaInfo.VideoCodec != "h264" && mediaInfo.VideoCodec != "avc" {
@@ -219,7 +232,12 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 		faststart = true
 	}
 
-	qp.logAndBroadcast(item.ID, item.FileID, "info", fmt.Sprintf("Output format: %s (faststart: %v)", container, faststart))
+	qp.logAndBroadcast(
+		item.ID,
+		item.FileID,
+		"info",
+		fmt.Sprintf("Output format: %s (faststart: %v)", container, faststart),
+	)
 
 	// Build output path
 	ext := filepath.Ext(item.File.Path)
@@ -311,11 +329,11 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *Q
 	}
 }
 
-// AddFileToQueue adds a file to the queue by path
+// AddFileToQueue adds a file to the queue by path.
 func (qp *QueueProcessor) AddFileToQueue(filePath string) error {
 	// Get file from database
 	file, err := GetFileByPath(qp.db, filePath)
-	if err == gorm.ErrRecordNotFound {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return fmt.Errorf("file not found in database: %s", filePath)
 	}
 	if err != nil {
@@ -336,7 +354,7 @@ func (qp *QueueProcessor) AddFileToQueue(filePath string) error {
 	return AddToQueue(qp.db, file.ID, 0)
 }
 
-// AddFolderToQueue adds all H.264/AVC files in a folder to the queue
+// AddFolderToQueue adds all H.264/AVC files in a folder to the queue.
 func (qp *QueueProcessor) AddFolderToQueue(folderPath string) (int, error) {
 	count := 0
 

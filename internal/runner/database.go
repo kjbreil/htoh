@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,7 +12,7 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// File represents a video file on disk with its metadata
+// File represents a video file on disk with its metadata.
 type File struct {
 	ID        uint      `gorm:"primaryKey"`
 	Path      string    `gorm:"uniqueIndex;not null"` // absolute path
@@ -23,7 +24,7 @@ type File struct {
 	UpdatedAt time.Time
 }
 
-// MediaInfo stores ffprobe results, one-to-one with File
+// MediaInfo stores ffprobe results, one-to-one with File.
 type MediaInfo struct {
 	ID     uint  `gorm:"primaryKey"`
 	FileID uint  `gorm:"uniqueIndex;not null"` // foreign key
@@ -57,7 +58,7 @@ type MediaInfo struct {
 	UpdatedAt time.Time
 }
 
-// QueueItem represents a file in the transcoding queue
+// QueueItem represents a file in the transcoding queue.
 type QueueItem struct {
 	ID           uint   `gorm:"primaryKey"`
 	FileID       uint   `gorm:"index;not null"` // foreign key to File
@@ -70,7 +71,7 @@ type QueueItem struct {
 	UpdatedAt    time.Time
 }
 
-// TaskLog represents a log entry for a transcoding task
+// TaskLog represents a log entry for a transcoding task.
 type TaskLog struct {
 	ID          uint       `gorm:"primaryKey"`
 	QueueItemID uint       `gorm:"index;not null"` // foreign key to QueueItem
@@ -82,7 +83,7 @@ type TaskLog struct {
 	CreatedAt   time.Time
 }
 
-// InitDB initializes the SQLite database with GORM
+// InitDB initializes the SQLite database with GORM.
 func InitDB(workDir string, debug bool) (*gorm.DB, error) {
 	// Create workDir if it doesn't exist
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
@@ -114,7 +115,7 @@ func InitDB(workDir string, debug bool) (*gorm.DB, error) {
 	return db, nil
 }
 
-// GetFileByPath retrieves a file record by its path
+// GetFileByPath retrieves a file record by its path.
 func GetFileByPath(db *gorm.DB, path string) (*File, error) {
 	var file File
 	result := db.Where("path = ?", path).First(&file)
@@ -124,17 +125,17 @@ func GetFileByPath(db *gorm.DB, path string) (*File, error) {
 	return &file, nil
 }
 
-// CreateOrUpdateFile creates a new file record or updates an existing one
+// CreateOrUpdateFile creates a new file record or updates an existing one.
 func CreateOrUpdateFile(db *gorm.DB, file *File) error {
 	if file == nil {
-		return fmt.Errorf("file cannot be nil")
+		return errors.New("file cannot be nil")
 	}
 
 	// Try to find existing file by path
 	var existing File
 	result := db.Where("path = ?", file.Path).First(&existing)
 
-	if result.Error == gorm.ErrRecordNotFound {
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 		// Create new record
 		if err := db.Create(file).Error; err != nil {
 			return fmt.Errorf("failed to create file: %w", err)
@@ -153,21 +154,21 @@ func CreateOrUpdateFile(db *gorm.DB, file *File) error {
 	return nil
 }
 
-// CreateOrUpdateMediaInfo creates a new media info record or updates an existing one
+// CreateOrUpdateMediaInfo creates a new media info record or updates an existing one.
 func CreateOrUpdateMediaInfo(db *gorm.DB, info *MediaInfo) error {
 	if info == nil {
-		return fmt.Errorf("media info cannot be nil")
+		return errors.New("media info cannot be nil")
 	}
 
 	if info.FileID == 0 {
-		return fmt.Errorf("media info must have a valid FileID")
+		return errors.New("media info must have a valid FileID")
 	}
 
 	// Try to find existing media info by FileID
 	var existing MediaInfo
 	result := db.Where("file_id = ?", info.FileID).First(&existing)
 
-	if result.Error == gorm.ErrRecordNotFound {
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 		// Create new record
 		if err := db.Create(info).Error; err != nil {
 			return fmt.Errorf("failed to create media info: %w", err)
@@ -186,7 +187,7 @@ func CreateOrUpdateMediaInfo(db *gorm.DB, info *MediaInfo) error {
 	return nil
 }
 
-// GetMediaInfoByFileID retrieves media info for a specific file
+// GetMediaInfoByFileID retrieves media info for a specific file.
 func GetMediaInfoByFileID(db *gorm.DB, fileID uint) (*MediaInfo, error) {
 	var info MediaInfo
 	result := db.Where("file_id = ?", fileID).First(&info)
@@ -196,7 +197,7 @@ func GetMediaInfoByFileID(db *gorm.DB, fileID uint) (*MediaInfo, error) {
 	return &info, nil
 }
 
-// AddToQueue adds a file to the transcoding queue
+// AddToQueue adds a file to the transcoding queue.
 func AddToQueue(db *gorm.DB, fileID uint, priority int) error {
 	// Check if already in queue (queued or processing)
 	var existing QueueItem
@@ -207,7 +208,7 @@ func AddToQueue(db *gorm.DB, fileID uint, priority int) error {
 		return nil
 	}
 
-	if result.Error != gorm.ErrRecordNotFound {
+	if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
 		return fmt.Errorf("failed to check queue: %w", result.Error)
 	}
 
@@ -237,7 +238,7 @@ func AddToQueue(db *gorm.DB, fileID uint, priority int) error {
 	return nil
 }
 
-// GetNextQueueItem retrieves the next item to process from the queue
+// GetNextQueueItem retrieves the next item to process from the queue.
 func GetNextQueueItem(db *gorm.DB) (*QueueItem, error) {
 	var item QueueItem
 	result := db.Where("status = ?", "queued").
@@ -252,7 +253,7 @@ func GetNextQueueItem(db *gorm.DB) (*QueueItem, error) {
 	return &item, nil
 }
 
-// UpdateQueueItemStatus updates the status of a queue item
+// UpdateQueueItemStatus updates the status of a queue item.
 func UpdateQueueItemStatus(db *gorm.DB, id uint, status string, errorMsg string) error {
 	updates := map[string]interface{}{
 		"status": status,
@@ -269,7 +270,7 @@ func UpdateQueueItemStatus(db *gorm.DB, id uint, status string, errorMsg string)
 	return nil
 }
 
-// GetQueueItems retrieves all queue items with optional status filter
+// GetQueueItems retrieves all queue items with optional status filter.
 func GetQueueItems(db *gorm.DB, status string) ([]QueueItem, error) {
 	var items []QueueItem
 	query := db.Preload("File")
@@ -286,7 +287,7 @@ func GetQueueItems(db *gorm.DB, status string) ([]QueueItem, error) {
 	return items, nil
 }
 
-// DeleteQueueItem removes a queue item by ID
+// DeleteQueueItem removes a queue item by ID.
 func DeleteQueueItem(db *gorm.DB, id uint) error {
 	if err := db.Delete(&QueueItem{}, id).Error; err != nil {
 		return fmt.Errorf("failed to delete queue item: %w", err)
@@ -294,7 +295,7 @@ func DeleteQueueItem(db *gorm.DB, id uint) error {
 	return nil
 }
 
-// CreateTaskLog creates a new task log entry
+// CreateTaskLog creates a new task log entry.
 func CreateTaskLog(db *gorm.DB, queueItemID, fileID uint, logLevel, message string) error {
 	log := &TaskLog{
 		QueueItemID: queueItemID,
@@ -310,7 +311,7 @@ func CreateTaskLog(db *gorm.DB, queueItemID, fileID uint, logLevel, message stri
 	return nil
 }
 
-// GetTaskLogsByQueueItem retrieves all log entries for a specific queue item
+// GetTaskLogsByQueueItem retrieves all log entries for a specific queue item.
 func GetTaskLogsByQueueItem(db *gorm.DB, queueItemID uint) ([]TaskLog, error) {
 	var logs []TaskLog
 	result := db.Where("queue_item_id = ?", queueItemID).Order("created_at ASC").Find(&logs)
@@ -320,7 +321,7 @@ func GetTaskLogsByQueueItem(db *gorm.DB, queueItemID uint) ([]TaskLog, error) {
 	return logs, nil
 }
 
-// GetTaskLogsByFile retrieves all log entries for a specific file
+// GetTaskLogsByFile retrieves all log entries for a specific file.
 func GetTaskLogsByFile(db *gorm.DB, fileID uint) ([]TaskLog, error) {
 	var logs []TaskLog
 	result := db.Where("file_id = ?", fileID).Order("created_at ASC").Find(&logs)
@@ -330,7 +331,7 @@ func GetTaskLogsByFile(db *gorm.DB, fileID uint) ([]TaskLog, error) {
 	return logs, nil
 }
 
-// DeleteTaskLogsByQueueItem deletes all log entries for a queue item
+// DeleteTaskLogsByQueueItem deletes all log entries for a queue item.
 func DeleteTaskLogsByQueueItem(db *gorm.DB, queueItemID uint) error {
 	if err := db.Where("queue_item_id = ?", queueItemID).Delete(&TaskLog{}).Error; err != nil {
 		return fmt.Errorf("failed to delete task logs: %w", err)

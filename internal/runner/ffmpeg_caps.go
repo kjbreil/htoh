@@ -84,7 +84,11 @@ func ValidateEngine(name, ffmpegPath string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("engine %q is not available with ffmpeg %q; run opti -list-hw to inspect support", name, ffmpegPath)
+	return fmt.Errorf(
+		"engine %q is not available with ffmpeg %q; run opti -list-hw to inspect support",
+		name,
+		ffmpegPath,
+	)
 }
 
 func engineOptionsFromEncoders(encoders string) []EngineInfo {

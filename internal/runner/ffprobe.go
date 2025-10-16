@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -75,7 +76,7 @@ type ProbeInfoDetailed struct {
 	ColorPrimaries string
 }
 
-// fpsFromFrac parses "24000/1001" → 23.976, "25/1" → 25, "0/0" → 0
+// fpsFromFrac parses "24000/1001" → 23.976, "25/1" → 25, "0/0" → 0.
 func fpsFromFrac(fr string) float64 {
 	parts := strings.Split(fr, "/")
 	if len(parts) != 2 {
@@ -116,7 +117,7 @@ func probe(ctx context.Context, ffprobePath, file string) (*ProbeInfoDetailed, e
 		}
 	}
 	if v == nil {
-		return nil, fmt.Errorf("no video stream")
+		return nil, errors.New("no video stream")
 	}
 
 	// Parse FPS

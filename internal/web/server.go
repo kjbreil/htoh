@@ -17,7 +17,7 @@ import (
 	"opti.local/opti/internal/runner"
 )
 
-// Server represents the web server
+// Server represents the web server.
 type Server struct {
 	db          *gorm.DB
 	cfg         runner.Config
@@ -26,7 +26,7 @@ type Server struct {
 	templates   *template.Template
 }
 
-// NewServer creates a new web server
+// NewServer creates a new web server.
 func NewServer(db *gorm.DB, cfg runner.Config, queueProc *runner.QueueProcessor) (*Server, error) {
 	broadcaster := NewEventBroadcaster()
 
@@ -82,7 +82,7 @@ func NewServer(db *gorm.DB, cfg runner.Config, queueProc *runner.QueueProcessor)
 	return s, nil
 }
 
-// Start starts the HTTP server
+// Start starts the HTTP server.
 func (s *Server) Start(ctx context.Context, port int) error {
 	mux := http.NewServeMux()
 
@@ -118,14 +118,14 @@ func (s *Server) Start(ctx context.Context, port int) error {
 	return nil
 }
 
-// handleIndex serves the main page
+// handleIndex serves the main page.
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if err := s.templates.ExecuteTemplate(w, "index.html", nil); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
 
-// TreeNode represents a node in the directory tree
+// TreeNode represents a node in the directory tree.
 type TreeNode struct {
 	Name     string       `json:"name"`
 	Path     string       `json:"path"`
@@ -138,7 +138,7 @@ type TreeNode struct {
 	Stats    *FolderStats `json:"stats,omitempty"`
 }
 
-// FolderStats represents aggregate statistics for a folder
+// FolderStats represents aggregate statistics for a folder.
 type FolderStats struct {
 	TotalFiles int            `json:"total_files"`
 	TotalSize  int64          `json:"total_size"`
@@ -146,7 +146,7 @@ type FolderStats struct {
 	H264Count  int            `json:"h264_count"`
 }
 
-// handleTree returns the directory tree structure
+// handleTree returns the directory tree structure.
 func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 
@@ -192,7 +192,7 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// buildTree builds a directory tree structure
+// buildTree builds a directory tree structure.
 func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 	// Get file info
 	info, err := os.Stat(rootPath)
@@ -293,7 +293,7 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 	return root, nil
 }
 
-// calculateFolderStats calculates aggregate statistics for a folder
+// calculateFolderStats calculates aggregate statistics for a folder.
 func (s *Server) calculateFolderStats(children *[]TreeNode) *FolderStats {
 	stats := &FolderStats{
 		CodecCount: make(map[string]int),
@@ -324,7 +324,7 @@ func (s *Server) calculateFolderStats(children *[]TreeNode) *FolderStats {
 	return stats
 }
 
-// handleConvert handles conversion requests
+// handleConvert handles conversion requests.
 func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -367,7 +367,7 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleEvents handles SSE connections
+// handleEvents handles SSE connections.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -399,7 +399,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleQueue returns the current queue status
+// handleQueue returns the current queue status.
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 
@@ -413,7 +413,7 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(items)
 }
 
-// formatSize formats a byte size as human-readable string
+// formatSize formats a byte size as human-readable string.
 func formatSize(size int64) string {
 	const unit = 1024
 	if size < unit {
@@ -427,7 +427,7 @@ func formatSize(size int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
 }
 
-// formatCodec formats a codec name for display
+// formatCodec formats a codec name for display.
 func formatCodec(codec string) string {
 	codec = strings.ToUpper(codec)
 	switch codec {
@@ -440,7 +440,7 @@ func formatCodec(codec string) string {
 	}
 }
 
-// handleQueueDelete handles deletion of a queue item
+// handleQueueDelete handles deletion of a queue item.
 func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -479,7 +479,7 @@ func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleQueueLogs returns logs for a specific queue item
+// handleQueueLogs returns logs for a specific queue item.
 func (s *Server) handleQueueLogs(w http.ResponseWriter, r *http.Request) {
 	idStr := r.URL.Query().Get("id")
 	if idStr == "" {
@@ -505,7 +505,7 @@ func (s *Server) handleQueueLogs(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(logs)
 }
 
-// renderQueueItemHTML renders a queue item as HTML
+// renderQueueItemHTML renders a queue item as HTML.
 func (s *Server) renderQueueItemHTML(item *runner.QueueItem) (string, error) {
 	// Ensure File is preloaded
 	if item.File == nil {
@@ -524,7 +524,7 @@ func (s *Server) renderQueueItemHTML(item *runner.QueueItem) (string, error) {
 	return buf.String(), nil
 }
 
-// handleQueueItem returns a single queue item as HTML
+// handleQueueItem returns a single queue item as HTML.
 func (s *Server) handleQueueItem(w http.ResponseWriter, r *http.Request) {
 	idStr := r.URL.Query().Get("id")
 	if idStr == "" {

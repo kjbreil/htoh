@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -15,7 +16,7 @@ import (
 	"opti.local/opti/internal/web"
 )
 
-// stringSlice is a custom flag type that allows multiple values
+// stringSlice is a custom flag type that allows multiple values.
 type stringSlice []string
 
 func (s *stringSlice) String() string {
@@ -28,21 +29,33 @@ func (s *stringSlice) Set(value string) error {
 }
 
 var (
-	sourceDirs     stringSlice
-	workDir        = flag.String("w", "", "Working directory (temp/state & outputs)")
-	interactive    = flag.Bool("I", false, "Interactive (prompt) mode")
-	keep           = flag.Bool("k", false, "Keep intermediates (reserved)")
-	silent         = flag.Bool("S", false, "Silent (less console output)")
-	workers        = flag.Int("j", 1, "Parallel workers")
-	scanInterval   = flag.Int("scan-interval", 5, "Minutes between scans (0 = scan once and exit)")
-	engine         = flag.String("engine", "cpu", "Engine: cpu|qsv|nvenc|vaapi")
-	device         = flag.String("device", "", "Hardware device path for VAAPI (default: /dev/dri/renderD128)")
-	ffmpegPath     = flag.String("ffmpeg", "ffmpeg", "Path to ffmpeg binary")
-	ffprobePath    = flag.String("ffprobe", "", "Path to ffprobe binary (defaults to sibling of -ffmpeg or system ffprobe)")
-	debugLogging   = flag.Bool("debug", false, "Enable verbose logging (file discovery, ffprobe calls)")
-	forceMP4       = flag.Bool("output-mp4", false, "Force outputs to MP4 container with -movflags +faststart")
-	faststartMP4   = flag.Bool("faststart-mp4", false, "Keep MP4 container when source is MP4 and add -movflags +faststart")
-	fastMode       = flag.Bool("fast", false, "Favor smaller files by lowering quality targets one notch across all engines")
+	sourceDirs   stringSlice
+	workDir      = flag.String("w", "", "Working directory (temp/state & outputs)")
+	interactive  = flag.Bool("I", false, "Interactive (prompt) mode")
+	keep         = flag.Bool("k", false, "Keep intermediates (reserved)")
+	silent       = flag.Bool("S", false, "Silent (less console output)")
+	workers      = flag.Int("j", 1, "Parallel workers")
+	scanInterval = flag.Int("scan-interval", 5, "Minutes between scans (0 = scan once and exit)")
+	engine       = flag.String("engine", "cpu", "Engine: cpu|qsv|nvenc|vaapi")
+	device       = flag.String("device", "", "Hardware device path for VAAPI (default: /dev/dri/renderD128)")
+	ffmpegPath   = flag.String("ffmpeg", "ffmpeg", "Path to ffmpeg binary")
+	ffprobePath  = flag.String(
+		"ffprobe",
+		"",
+		"Path to ffprobe binary (defaults to sibling of -ffmpeg or system ffprobe)",
+	)
+	debugLogging = flag.Bool("debug", false, "Enable verbose logging (file discovery, ffprobe calls)")
+	forceMP4     = flag.Bool("output-mp4", false, "Force outputs to MP4 container with -movflags +faststart")
+	faststartMP4 = flag.Bool(
+		"faststart-mp4",
+		false,
+		"Keep MP4 container when source is MP4 and add -movflags +faststart",
+	)
+	fastMode = flag.Bool(
+		"fast",
+		false,
+		"Favor smaller files by lowering quality targets one notch across all engines",
+	)
 	listHW         = flag.Bool("list-hw", false, "Detect and print available hardware accelerators/encoders, then exit")
 	version        = flag.Bool("version", false, "Print version and exit")
 	configPath     = flag.String("c", "", "Path to TOML config file (config values override CLI flags)")
@@ -191,7 +204,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := runner.Run(ctx, cfg); err != nil && err != context.Canceled {
+		if err := runner.Run(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
 			fmt.Fprintf(os.Stderr, "opti: scanner error: %v\n", err)
 		}
 	}()

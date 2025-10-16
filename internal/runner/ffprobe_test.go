@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// Real ffprobe output from: Gen V - S01E03 - #ThinkBrink Bluray-1080p.mkv
+// Real ffprobe output from: Gen V - S01E03 - #ThinkBrink Bluray-1080p.mkv.
 const realWorldFFProbeOutput = `{
     "streams": [
         {
@@ -357,7 +357,7 @@ func TestProbeNoVideoStream(t *testing.T) {
 	}
 }
 
-// TestProbeIntegration tests the actual probe() function if ffprobe is available
+// TestProbeIntegration tests the actual probe() function if ffprobe is available.
 func TestProbeIntegration(t *testing.T) {
 	// Check if ffprobe is available
 	ffprobePath, err := exec.LookPath("ffprobe")
@@ -409,5 +409,11 @@ func TestProbeIntegration(t *testing.T) {
 
 	t.Logf("Integration test passed!")
 	t.Logf("Probed: %s (%s), %dx%d @ %.3f fps", info.VideoCodec, info.VideoProfile, info.Width, info.Height, info.FPS)
-	t.Logf("Color: %s/%s, Bitrate: %d bps, Duration: %.2f sec", info.ColorSpace, info.PixelFormat, info.VideoBitrate, info.Duration)
+	t.Logf(
+		"Color: %s/%s, Bitrate: %d bps, Duration: %.2f sec",
+		info.ColorSpace,
+		info.PixelFormat,
+		info.VideoBitrate,
+		info.Duration,
+	)
 }

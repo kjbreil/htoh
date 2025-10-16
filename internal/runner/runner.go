@@ -3,6 +3,7 @@ package runner
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -53,7 +54,7 @@ type job struct {
 	Quality   qualityChoice
 }
 
-// NormalizeConfig sets default values for config fields that may be empty
+// NormalizeConfig sets default values for config fields that may be empty.
 func NormalizeConfig(cfg *Config) {
 	// Set default ffmpeg path if not provided
 	ffmpegPath := strings.TrimSpace(cfg.FFmpegPath)
@@ -187,7 +188,7 @@ func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, 
 		existingFile, err := GetFileByPath(db, p)
 		needsProbe := false
 
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			// New file
 			needsProbe = true
 			if debug {
@@ -554,7 +555,7 @@ func transcode(ctx context.Context, cfg Config, jb job, workerID int, prog *Prog
 
 	// Log the command path being used (for debugging "exec: no command" errors)
 	if cfg.FFmpegPath == "" {
-		return fmt.Errorf("ffmpeg path is empty - this should not happen")
+		return errors.New("ffmpeg path is empty - this should not happen")
 	}
 
 	cmd := exec.CommandContext(ctx, cfg.FFmpegPath, args...)
@@ -656,7 +657,11 @@ func validateVAAPIDevice(device string) (string, error) {
 				}
 			}
 			if len(available) > 0 {
-				return "", fmt.Errorf("VAAPI device %q not found; available devices: %s", device, strings.Join(available, ", "))
+				return "", fmt.Errorf(
+					"VAAPI device %q not found; available devices: %s",
+					device,
+					strings.Join(available, ", "),
+				)
 			}
 			return "", fmt.Errorf("VAAPI device %q not found and no renderD devices found in /dev/dri", device)
 		}

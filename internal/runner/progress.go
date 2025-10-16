@@ -56,7 +56,7 @@ func (p *Prog) Fail(wid int, err string) {
 	}
 }
 
-// GetProgress returns a copy of the current progress for a worker
+// GetProgress returns a copy of the current progress for a worker.
 func (p *Prog) GetProgress(wid int) *Row {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
