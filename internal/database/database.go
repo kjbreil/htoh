@@ -70,7 +70,7 @@ type QualityProfile struct {
 	ID                uint      `gorm:"primaryKey"               json:"id"`
 	Name              string    `gorm:"uniqueIndex;not null"     json:"name"`
 	Description       string    `gorm:"type:text"                json:"description"`
-	Mode              string    `gorm:"not null"                 json:"mode"`               // "vbr" or "cbr"
+	Mode              string    `gorm:"not null"                 json:"mode"`               // "vbr", "cbr", or "cbr_percent"
 	TargetBitrate     int64     `gorm:"default:0"                json:"target_bitrate"`     // for CBR mode in bits per second
 	QualityLevel      int       `gorm:"default:0"                json:"quality_level"`      // for VBR mode (0-51 range)
 	BitrateMultiplier float64   `gorm:"default:0"                json:"bitrate_multiplier"` // for VBR with bitrate hint (e.g., 0.5 = 50% of source)
@@ -232,29 +232,75 @@ func GetMediaInfoByFileID(db *gorm.DB, fileID uint) (*MediaInfo, error) {
 }
 
 // IsEligibleForConversion determines if a file is eligible for transcoding
-// based on its media info and current configuration.
-// Currently checks if the codec is H.264/AVC. Future enhancements can add
-// checks for bitrate, resolution, quality settings, etc.
+// based on its media info. This function provides backward compatibility
+// and checks only for H.264/AVC codec (suitable for codec conversion).
+// For profile-aware eligibility checks, use IsEligibleForConversionWithProfile.
 func IsEligibleForConversion(mediaInfo *MediaInfo) bool {
 	if mediaInfo == nil {
 		return false
 	}
 
-	// Currently, only H.264/AVC files are eligible for conversion to H.265/HEVC
+	// Only H.264/AVC files are eligible for conversion to H.265/HEVC
 	if mediaInfo.VideoCodec == CodecH264 || mediaInfo.VideoCodec == CodecAVC {
 		return true
 	}
 
-	// Future: Add checks for H.265 files that need re-encoding
-	// - Bitrate too high
-	// - Quality settings changed
-	// - Resolution/encoding parameters changed
-	// Example:
-	// if mediaInfo.VideoCodec == CodecHEVC && mediaInfo.VideoBitrate > cfg.MaxBitrate {
-	//     return true
-	// }
-
 	return false
+}
+
+// IsEligibleForConversionWithProfile determines if a file is eligible for transcoding
+// based on its media info and the specified quality profile mode.
+// This provides profile-aware eligibility checking:
+// - For H.264/AVC: always eligible (all modes work - codec conversion or re-encoding)
+// - For HEVC with "cbr_percent" mode: NOT eligible (cbr_percent only makes sense when changing codecs)
+// - For HEVC with "vbr" or "cbr" mode: eligible (can re-encode HEVC to different quality)
+// - For other codecs: not eligible
+func IsEligibleForConversionWithProfile(mediaInfo *MediaInfo, profile *QualityProfile) bool {
+	if mediaInfo == nil || profile == nil {
+		return false
+	}
+
+	// Normalize the mode string
+	mode := GetQualityProfileMode(profile)
+
+	// H.264/AVC is always eligible - all quality modes work for codec conversion
+	if mediaInfo.VideoCodec == CodecH264 || mediaInfo.VideoCodec == CodecAVC {
+		return true
+	}
+
+	// HEVC eligibility depends on the quality mode
+	if mediaInfo.VideoCodec == CodecHEVC {
+		// cbr_percent mode only makes sense when changing codecs (e.g., H.264 -> HEVC)
+		// For HEVC files, cbr_percent has no meaningful interpretation since there's no codec change
+		if mode == "cbr_percent" {
+			return false
+		}
+
+		// vbr and cbr modes can re-encode HEVC files to different quality levels
+		if mode == "vbr" || mode == "cbr" {
+			return true
+		}
+	}
+
+	// Other codecs are not supported
+	return false
+}
+
+// GetQualityProfileMode returns the normalized quality profile mode string.
+// Valid modes are: "vbr", "cbr", "cbr_percent".
+// If the mode is invalid or empty, returns "vbr" as the default.
+func GetQualityProfileMode(profile *QualityProfile) string {
+	if profile == nil {
+		return "vbr"
+	}
+
+	mode := profile.Mode
+	if mode == "vbr" || mode == "cbr" || mode == "cbr_percent" {
+		return mode
+	}
+
+	// Default to vbr for invalid modes
+	return "vbr"
 }
 
 // CreateOrUpdateQualityProfile creates a new quality profile or updates an existing one.
@@ -364,7 +410,7 @@ func CreateDefaultProfile(db *gorm.DB) error {
 	profile := &QualityProfile{
 		Name:              "Current Quality",
 		Description:       "Adaptive quality based on source bitrate (~50% reduction)",
-		Mode:              "vbr",
+		Mode:              "cbr_percent",
 		TargetBitrate:     0,
 		QualityLevel:      0,
 		BitrateMultiplier: 0.5,

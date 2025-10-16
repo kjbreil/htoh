@@ -209,9 +209,22 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *d
 			mediaInfo.VideoCodec, mediaInfo.Width, mediaInfo.Height, mediaInfo.FPS, mediaInfo.VideoBitrate),
 	)
 
-	// Check if file is eligible for conversion
-	if !database.IsEligibleForConversion(mediaInfo) {
-		errMsg := fmt.Sprintf("file is not eligible for conversion (codec: %s)", mediaInfo.VideoCodec)
+	// Validate quality profile
+	if item.QualityProfile == nil {
+		errMsg := "quality profile not found for queue item"
+		qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
+		var updateErr error
+		if updateErr = database.UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg); updateErr != nil {
+			fmt.Fprintf(os.Stderr, "[worker %d] Failed to update queue item status: %v\n", workerID, updateErr)
+		}
+		qp.broadcastHTML(item.ID)
+		return
+	}
+
+	// Check if file is eligible for conversion with this profile
+	if !database.IsEligibleForConversionWithProfile(mediaInfo, item.QualityProfile) {
+		errMsg := fmt.Sprintf("file is not eligible for conversion with profile %s (codec: %s, mode: %s)",
+			item.QualityProfile.Name, mediaInfo.VideoCodec, item.QualityProfile.Mode)
 		qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
 		var updateErr error
 		if updateErr = database.UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg); updateErr != nil {
@@ -385,23 +398,18 @@ func (qp *QueueProcessor) AddFileToQueue(filePath string, qualityProfileID uint)
 		return 0, fmt.Errorf("failed to get file: %w", err)
 	}
 
-	// Get media info and check eligibility
+	// Get media info
 	var mediaInfo *database.MediaInfo
 	mediaInfo, err = database.GetMediaInfoByFileID(qp.db, file.ID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get media info: %w", err)
 	}
 
-	// Check if file is eligible for conversion
-	if !database.IsEligibleForConversion(mediaInfo) {
-		return 0, fmt.Errorf("file is not eligible for conversion (codec: %s)", mediaInfo.VideoCodec)
-	}
-
 	// Determine quality profile to use
+	var profile *database.QualityProfile
 	var profileID uint
 	if qualityProfileID == 0 {
 		// Get default quality profile
-		var profile *database.QualityProfile
 		profile, err = database.GetDefaultQualityProfile(qp.db)
 		if err != nil {
 			return 0, fmt.Errorf("failed to get default quality profile: %w", err)
@@ -409,7 +417,6 @@ func (qp *QueueProcessor) AddFileToQueue(filePath string, qualityProfileID uint)
 		profileID = profile.ID
 	} else {
 		// Validate that the specified profile exists
-		var profile *database.QualityProfile
 		profile, err = database.GetQualityProfileByID(qp.db, qualityProfileID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return 0, fmt.Errorf("quality profile with ID %d not found", qualityProfileID)
@@ -418,6 +425,12 @@ func (qp *QueueProcessor) AddFileToQueue(filePath string, qualityProfileID uint)
 			return 0, fmt.Errorf("failed to get quality profile: %w", err)
 		}
 		profileID = profile.ID
+	}
+
+	// Check if file is eligible for conversion with this profile
+	if !database.IsEligibleForConversionWithProfile(mediaInfo, profile) {
+		return 0, fmt.Errorf("file is not eligible for conversion with profile %s (codec: %s, mode: %s)",
+			profile.Name, mediaInfo.VideoCodec, profile.Mode)
 	}
 
 	// Add to queue
@@ -431,11 +444,11 @@ func (qp *QueueProcessor) AddFolderToQueue(folderPath string, qualityProfileID u
 	count := 0
 
 	// Determine quality profile to use
+	var profile *database.QualityProfile
 	var profileID uint
 	var err error
 	if qualityProfileID == 0 {
 		// Get default quality profile
-		var profile *database.QualityProfile
 		profile, err = database.GetDefaultQualityProfile(qp.db)
 		if err != nil {
 			return 0, fmt.Errorf("failed to get default quality profile: %w", err)
@@ -443,7 +456,6 @@ func (qp *QueueProcessor) AddFolderToQueue(folderPath string, qualityProfileID u
 		profileID = profile.ID
 	} else {
 		// Validate that the specified profile exists
-		var profile *database.QualityProfile
 		profile, err = database.GetQualityProfileByID(qp.db, qualityProfileID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return 0, fmt.Errorf("quality profile with ID %d not found", qualityProfileID)
@@ -461,15 +473,15 @@ func (qp *QueueProcessor) AddFolderToQueue(folderPath string, qualityProfileID u
 	}
 
 	for _, file := range files {
-		// Get media info and check eligibility
+		// Get media info
 		var mediaInfo *database.MediaInfo
 		mediaInfo, err = database.GetMediaInfoByFileID(qp.db, file.ID)
 		if err != nil {
 			continue
 		}
 
-		// Check if file is eligible for conversion
-		if !database.IsEligibleForConversion(mediaInfo) {
+		// Check if file is eligible for conversion with this profile
+		if !database.IsEligibleForConversionWithProfile(mediaInfo, profile) {
 			continue
 		}
 

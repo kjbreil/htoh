@@ -681,13 +681,14 @@
 
         .mode-selector {
             display: flex;
-            gap: 15px;
+            gap: 10px;
             margin-bottom: 20px;
         }
 
         .mode-option {
             flex: 1;
             position: relative;
+            min-width: 0;
         }
 
         .mode-option input[type="radio"] {
@@ -697,13 +698,16 @@
 
         .mode-label {
             display: block;
-            padding: 12px;
+            padding: 12px 8px;
             background: #1a1a1a;
             border: 2px solid #444;
             text-align: center;
             cursor: pointer;
-            font-size: 13px;
+            font-size: 12px;
             transition: all 0.2s;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         .mode-option input[type="radio"]:checked + .mode-label {
@@ -1574,6 +1578,10 @@
             html += '<input type="radio" id="mode-cbr" name="mode" value="cbr" onchange="updateModeFields()">';
             html += '<label for="mode-cbr" class="mode-label">CBR (Constant Bitrate)</label>';
             html += '</div>';
+            html += '<div class="mode-option">';
+            html += '<input type="radio" id="mode-cbr-percent" name="mode" value="cbr_percent" onchange="updateModeFields()">';
+            html += '<label for="mode-cbr-percent" class="mode-label">CBR % (Percent of Source)</label>';
+            html += '</div>';
             html += '</div>';
             html += '</div>';
 
@@ -1607,6 +1615,15 @@
             html += '<label class="form-label required">Target Bitrate (Mbps)</label>';
             html += '<input type="number" id="target-bitrate" class="form-input" min="0.1" step="0.1" placeholder="e.g., 5.0">';
             html += '<div class="help-text">Fixed bitrate encoding</div>';
+            html += '</div>';
+            html += '</div>';
+
+            // CBR Percent fields
+            html += '<div id="cbr-percent-fields" class="mode-fields">';
+            html += '<div class="form-group">';
+            html += '<label class="form-label required">Bitrate Percentage</label>';
+            html += '<input type="number" id="bitrate-percent" class="form-input" min="10" max="100" step="5" placeholder="50" value="50">';
+            html += '<div class="help-text">Target bitrate as % of source (e.g., 50 = 50% of original). Only works when changing codecs (H.264 → H.265).</div>';
             html += '</div>';
             html += '</div>';
 
@@ -1668,6 +1685,9 @@
                 } else if (profile.mode === 'cbr') {
                     const bitrateMbps = (profile.target_bitrate_bps / 1000000).toFixed(1);
                     html += '<span class="label">Bitrate:</span> <span class="value">' + bitrateMbps + ' Mbps</span>';
+                } else if (profile.mode === 'cbr_percent') {
+                    const percent = (profile.bitrate_multiplier * 100).toFixed(0);
+                    html += '<span class="label">Bitrate:</span> <span class="value">' + percent + '% of source</span>';
                 }
 
                 html += '</div>';
@@ -1697,6 +1717,7 @@
             document.getElementById('quality-slider').value = 22;
             document.getElementById('bitrate-multiplier').value = '';
             document.getElementById('target-bitrate').value = '';
+            document.getElementById('bitrate-percent').value = 50;
             document.getElementById('set-default').checked = false;
             updateSliderValue();
             updateModeFields();
@@ -1710,8 +1731,12 @@
 
         function updateModeFields() {
             const isVBR = document.getElementById('mode-vbr').checked;
+            const isCBR = document.getElementById('mode-cbr').checked;
+            const isCBRPercent = document.getElementById('mode-cbr-percent').checked;
+
             document.getElementById('vbr-fields').classList.toggle('active', isVBR);
-            document.getElementById('cbr-fields').classList.toggle('active', !isVBR);
+            document.getElementById('cbr-fields').classList.toggle('active', isCBR);
+            document.getElementById('cbr-percent-fields').classList.toggle('active', isCBRPercent);
         }
 
         function updateSliderValue() {
@@ -1737,9 +1762,13 @@
                 document.getElementById('mode-vbr').checked = true;
                 document.getElementById('quality-slider').value = profile.quality || 22;
                 document.getElementById('bitrate-multiplier').value = profile.bitrate_multiplier > 0 ? profile.bitrate_multiplier : '';
-            } else {
+            } else if (profile.mode === 'cbr') {
                 document.getElementById('mode-cbr').checked = true;
                 document.getElementById('target-bitrate').value = profile.target_bitrate_bps > 0 ? (profile.target_bitrate_bps / 1000000).toFixed(1) : '';
+            } else if (profile.mode === 'cbr_percent') {
+                document.getElementById('mode-cbr-percent').checked = true;
+                const percent = profile.bitrate_multiplier > 0 ? (profile.bitrate_multiplier * 100) : 50;
+                document.getElementById('bitrate-percent').value = percent;
             }
 
             document.getElementById('set-default').checked = profile.is_default || false;
@@ -1755,7 +1784,8 @@
                 return;
             }
 
-            const mode = document.getElementById('mode-vbr').checked ? 'vbr' : 'cbr';
+            const mode = document.getElementById('mode-vbr').checked ? 'vbr' :
+                         document.getElementById('mode-cbr').checked ? 'cbr' : 'cbr_percent';
             const setDefault = document.getElementById('set-default').checked;
 
             const profile = {
@@ -1769,13 +1799,20 @@
                 profile.quality = parseInt(document.getElementById('quality-slider').value);
                 const multiplier = document.getElementById('bitrate-multiplier').value;
                 profile.bitrate_multiplier = multiplier ? parseFloat(multiplier) : 0;
-            } else {
+            } else if (mode === 'cbr') {
                 const bitrateMbps = document.getElementById('target-bitrate').value;
                 if (!bitrateMbps) {
                     showNotification('Target bitrate is required for CBR mode', true);
                     return;
                 }
                 profile.target_bitrate_bps = Math.floor(parseFloat(bitrateMbps) * 1000000);
+            } else if (mode === 'cbr_percent') {
+                const percent = document.getElementById('bitrate-percent').value;
+                if (!percent) {
+                    showNotification('Bitrate percentage is required for CBR Percent mode', true);
+                    return;
+                }
+                profile.bitrate_multiplier = parseFloat(percent) / 100.0;
             }
 
             const url = editingProfileId ? '/api/profiles/' + editingProfileId : '/api/profiles';

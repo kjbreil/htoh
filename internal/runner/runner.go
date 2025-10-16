@@ -22,7 +22,7 @@ const (
 )
 
 type QualityChoice struct {
-	Mode          string  // "vbr" or "cbr"
+	Mode          string  // "vbr", "cbr", or "cbr_percent"
 	TargetBitrate int64   // for CBR mode in bits per second
 	CRF           int     // for VBR mode (cpu/vaapi)
 	ICQ           int     // for VBR mode (qsv)
@@ -72,6 +72,27 @@ func DeriveQualityFromProfile(profile *database.QualityProfile, info *ProbeInfo)
 		return QualityChoice{
 			Mode:          "cbr",
 			TargetBitrate: profile.TargetBitrate,
+			CRF:           0,
+			ICQ:           0,
+			CQ:            0,
+			SourceBitrate: bitrate,
+			BitsPerPixel:  bpp,
+		}
+
+	case "cbr_percent":
+		// Constant Bitrate with percentage mode - calculate target from source bitrate
+		// Note: This encodes as CBR, but the target is calculated as a percentage of source
+		var targetBitrate int64
+		if profile.BitrateMultiplier > 0 && bitrate > 0 {
+			targetBitrate = int64(float64(bitrate) * profile.BitrateMultiplier)
+		} else if profile.TargetBitrate > 0 {
+			// Fallback to explicit target if source bitrate unavailable
+			targetBitrate = profile.TargetBitrate
+		}
+
+		return QualityChoice{
+			Mode:          "cbr", // Encode as CBR (percent is just how we calculate target)
+			TargetBitrate: targetBitrate,
 			CRF:           0,
 			ICQ:           0,
 			CQ:            0,
