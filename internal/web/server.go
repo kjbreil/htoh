@@ -146,15 +146,16 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 
 // TreeNode represents a node in the directory tree.
 type TreeNode struct {
-	Name     string       `json:"name"`
-	Path     string       `json:"path"`
-	IsDir    bool         `json:"is_dir"`
-	FileID   uint         `json:"file_id,omitempty"`
-	Codec    string       `json:"codec,omitempty"`
-	Size     int64        `json:"size,omitempty"`
-	Status   string       `json:"status,omitempty"`
-	Children []TreeNode   `json:"children,omitempty"`
-	Stats    *FolderStats `json:"stats,omitempty"`
+	Name       string       `json:"name"`
+	Path       string       `json:"path"`
+	IsDir      bool         `json:"is_dir"`
+	FileID     uint         `json:"file_id,omitempty"`
+	Codec      string       `json:"codec,omitempty"`
+	Size       int64        `json:"size,omitempty"`
+	Status     string       `json:"status,omitempty"`
+	CanConvert bool         `json:"can_convert,omitempty"`
+	Children   []TreeNode   `json:"children,omitempty"`
+	Stats      *FolderStats `json:"stats,omitempty"`
 }
 
 // FolderStats represents aggregate statistics for a folder.
@@ -222,6 +223,13 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 
 // buildTree builds a directory tree structure.
 func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
+	// Get default quality profile for convertibility checks
+	defaultProfile, err := database.GetDefaultQualityProfile(s.db)
+	if err != nil {
+		// If no default profile exists, log it but continue (all files will be non-convertible)
+		fmt.Fprintf(os.Stderr, "Warning: no default quality profile found: %v\n", err)
+	}
+
 	// Get file info
 	info, err := os.Stat(rootPath)
 	if err != nil {
@@ -247,6 +255,10 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 			mediaInfo, err = database.GetMediaInfoByFileID(s.db, file.ID)
 			if err == nil {
 				root.Codec = mediaInfo.VideoCodec
+				// Check if file is convertible with default profile
+				if defaultProfile != nil {
+					root.CanConvert = database.IsEligibleForConversionWithProfile(mediaInfo, defaultProfile)
+				}
 			}
 		}
 		return root, nil
@@ -305,6 +317,10 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 				mediaInfo, err = database.GetMediaInfoByFileID(s.db, file.ID)
 				if err == nil {
 					childNode.Codec = mediaInfo.VideoCodec
+					// Check if file is convertible with default profile
+					if defaultProfile != nil {
+						childNode.CanConvert = database.IsEligibleForConversionWithProfile(mediaInfo, defaultProfile)
+					}
 				}
 			}
 
