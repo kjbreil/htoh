@@ -27,6 +27,7 @@ type LogBroadcaster interface {
 		sizeBytes int64,
 		device string,
 	)
+	BroadcastQueueUpdated(queueID, fileID uint, status string)
 }
 
 // QueueProcessor manages the transcoding queue.
@@ -363,6 +364,76 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *d
 
 	qp.logAndBroadcast(item.ID, item.FileID, "info", "Transcoding completed successfully")
 
+	// Re-analyze the converted file to update database with new file stats and codec info
+	qp.logAndBroadcast(item.ID, item.FileID, "info", "Re-analyzing converted file...")
+
+	// Get updated file stats
+	var fileInfo os.FileInfo
+	var statErr error
+	fileInfo, statErr = os.Stat(item.File.Path)
+	if statErr != nil {
+		// Log warning but don't fail the task (conversion already succeeded)
+		qp.logAndBroadcast(item.ID, item.FileID, "warning",
+			fmt.Sprintf("Failed to stat converted file: %v", statErr))
+	} else {
+		// Update File record with new size and modtime
+		var updateErr error
+		updateErr = qp.db.Model(&database.File{}).
+			Where("id = ?", item.FileID).
+			Updates(map[string]interface{}{
+				"size":     fileInfo.Size(),
+				"mod_time": fileInfo.ModTime(),
+			}).Error
+		if updateErr != nil {
+			qp.logAndBroadcast(item.ID, item.FileID, "warning",
+				fmt.Sprintf("Failed to update file stats: %v", updateErr))
+		}
+	}
+
+	// Re-probe the file to get updated codec information
+	var probeResult *runner.ProbeInfoDetailed
+	var probeErr error
+	probeResult, probeErr = runner.Probe(ctx, qp.cfg.FFprobePath, item.File.Path)
+	if probeErr != nil {
+		// Log warning but don't fail the task (conversion already succeeded)
+		qp.logAndBroadcast(item.ID, item.FileID, "warning",
+			fmt.Sprintf("Failed to re-probe converted file: %v", probeErr))
+	} else {
+		// Update MediaInfo record with new codec information
+		updatedMediaInfo := &database.MediaInfo{
+			FileID:         item.FileID,
+			Duration:       probeResult.Duration,
+			FormatBitrate:  probeResult.FormatBitrate,
+			Container:      probeResult.Container,
+			VideoCodec:     probeResult.VideoCodec,
+			VideoProfile:   probeResult.VideoProfile,
+			Width:          probeResult.Width,
+			Height:         probeResult.Height,
+			CodedWidth:     probeResult.CodedWidth,
+			CodedHeight:    probeResult.CodedHeight,
+			FPS:            probeResult.FPS,
+			AspectRatio:    probeResult.AspectRatio,
+			VideoBitrate:   probeResult.VideoBitrate,
+			PixelFormat:    probeResult.PixelFormat,
+			BitDepth:       probeResult.BitDepth,
+			ChromaLocation: probeResult.ChromaLocation,
+			ColorSpace:     probeResult.ColorSpace,
+			ColorRange:     probeResult.ColorRange,
+			ColorPrimaries: probeResult.ColorPrimaries,
+		}
+
+		var saveErr error
+		if saveErr = database.CreateOrUpdateMediaInfo(qp.db, updatedMediaInfo); saveErr != nil {
+			qp.logAndBroadcast(item.ID, item.FileID, "warning",
+				fmt.Sprintf("Failed to update media info: %v", saveErr))
+		} else {
+			qp.logAndBroadcast(item.ID, item.FileID, "info",
+				fmt.Sprintf("Re-analysis complete: codec=%s, resolution=%dx%d, bitrate=%d",
+					updatedMediaInfo.VideoCodec, updatedMediaInfo.Width, updatedMediaInfo.Height,
+					updatedMediaInfo.VideoBitrate))
+		}
+	}
+
 	// Mark as done
 	var doneErr error
 	if doneErr = database.UpdateQueueItemStatus(qp.db, item.ID, "done", ""); doneErr != nil {
@@ -370,6 +441,11 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *d
 		return
 	}
 	qp.broadcastHTML(item.ID)
+
+	// Broadcast queue updated event to trigger frontend tree reload with updated file info
+	if qp.broadcaster != nil {
+		qp.broadcaster.BroadcastQueueUpdated(item.ID, item.FileID, "done")
+	}
 
 	// Update file status
 	var statusErr error
