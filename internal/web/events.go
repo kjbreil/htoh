@@ -138,17 +138,21 @@ func (eb *EventBroadcaster) BroadcastProgressUpdate(
 	outTimeS float64,
 	sizeBytes int64,
 	device string,
+	elapsedSeconds float64,
+	etaSeconds float64,
 ) {
 	eb.Broadcast(Event{
 		Type: EventProgressUpdate,
 		Data: map[string]interface{}{
-			"queue_item_id": queueItemID,
-			"file_id":       fileID,
-			"fps":           fps,
-			"speed":         speed,
-			"out_time_s":    outTimeS,
-			"size_bytes":    sizeBytes,
-			"device":        device,
+			"queue_item_id":   queueItemID,
+			"file_id":         fileID,
+			"fps":             fps,
+			"speed":           speed,
+			"out_time_s":      outTimeS,
+			"size_bytes":      sizeBytes,
+			"device":          device,
+			"elapsed_seconds": elapsedSeconds,
+			"eta_seconds":     etaSeconds,
 		},
 	})
 }

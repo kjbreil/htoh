@@ -24,6 +24,8 @@ type Row struct {
 	SizeBytes int64
 	Device    string // VAAPI device path (e.g., "renderD128")
 	Err       string
+	StartTime time.Time // when transcoding started
+	DurationS float64   // total video duration in seconds
 }
 
 func NewProg() *Prog { return &Prog{rows: make(map[int]*Row)} }

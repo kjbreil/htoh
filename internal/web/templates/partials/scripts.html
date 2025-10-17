@@ -455,6 +455,10 @@
                 html += '<span class="time" id="progress-time-' + itemId + '">--</span>';
                 html += '<span class="sep">•</span>';
                 html += '<span class="size" id="progress-size-' + itemId + '">--</span>';
+                html += '<span class="sep">•</span>';
+                html += '<span class="elapsed" id="progress-elapsed-' + itemId + '">--</span>';
+                html += '<span class="sep">•</span>';
+                html += '<span class="eta" id="progress-eta-' + itemId + '">--</span>';
                 html += '</span>';
 
                 if (error) {
@@ -600,6 +604,18 @@
                 const sizeElem = document.getElementById('progress-size-' + itemId);
                 if (sizeElem && progressData.size_bytes > 0) {
                     sizeElem.textContent = formatSize(progressData.size_bytes);
+                }
+
+                // Update Elapsed Time
+                const elapsedElem = document.getElementById('progress-elapsed-' + itemId);
+                if (elapsedElem && progressData.elapsed_seconds > 0) {
+                    elapsedElem.textContent = formatTime(progressData.elapsed_seconds);
+                }
+
+                // Update ETA
+                const etaElem = document.getElementById('progress-eta-' + itemId);
+                if (etaElem && progressData.eta_seconds > 0) {
+                    etaElem.textContent = 'ETA ' + formatTime(progressData.eta_seconds);
                 }
             }
         }

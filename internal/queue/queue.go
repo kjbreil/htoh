@@ -26,6 +26,8 @@ type LogBroadcaster interface {
 		outTimeS float64,
 		sizeBytes int64,
 		device string,
+		elapsedSeconds float64,
+		etaSeconds float64,
 	)
 	BroadcastQueueUpdated(queueID, fileID uint, status string)
 }
@@ -308,6 +310,12 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *d
 	// Create a simple progress tracker (no live dashboard for queue mode)
 	prog := progress.NewProg()
 
+	// Initialize progress tracking with start time and duration
+	prog.Update(workerID, func(r *progress.Row) {
+		r.StartTime = time.Now()
+		r.DurationS = mediaInfo.Duration
+	})
+
 	// Start progress broadcasting goroutine
 	progressCtx, cancelProgress := context.WithCancel(ctx)
 	defer cancelProgress()
@@ -325,6 +333,16 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *d
 				if row := prog.GetProgress(workerID); row != nil && qp.broadcaster != nil {
 					// Only broadcast if we have meaningful progress data
 					if row.FPS > 0 || row.OutTimeS > 0 {
+						// Calculate elapsed time and ETA
+						var elapsed, eta float64
+						if !row.StartTime.IsZero() {
+							elapsed = time.Since(row.StartTime).Seconds()
+							// Calculate ETA only if we have meaningful progress
+							if row.OutTimeS > 0 && row.DurationS > row.OutTimeS {
+								eta = elapsed * (row.DurationS - row.OutTimeS) / row.OutTimeS
+							}
+						}
+
 						qp.broadcaster.BroadcastProgressUpdate(
 							item.ID,
 							item.FileID,
@@ -333,6 +351,8 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *d
 							row.OutTimeS,
 							row.SizeBytes,
 							row.Device,
+							elapsed,
+							eta,
 						)
 					}
 				}
