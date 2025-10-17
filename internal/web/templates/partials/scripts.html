@@ -1058,4 +1058,217 @@
                 showNotification('Error: ' + err.message, true);
             });
         }
+
+        // Filtered Files functionality
+        let selectedFiles = new Set();
+        let currentFilteredFiles = [];
+
+        function applyFilters() {
+            const needsConvert = document.getElementById('filter-needs-convert').checked;
+            const minBitrate = document.getElementById('filter-min-bitrate').value;
+            const maxBitrate = document.getElementById('filter-max-bitrate').value;
+            const minSize = document.getElementById('filter-min-size').value;
+            const maxSize = document.getElementById('filter-max-size').value;
+            const sourceDir = document.getElementById('filter-source-dir').value;
+            const codec = document.getElementById('filter-codec').value;
+
+            // Build query string
+            const params = new URLSearchParams();
+            if (needsConvert) params.append('needs_convert', 'true');
+            if (minBitrate) params.append('min_bitrate', minBitrate);
+            if (maxBitrate) params.append('max_bitrate', maxBitrate);
+            if (minSize) params.append('min_size', minSize);
+            if (maxSize) params.append('max_size', maxSize);
+            if (sourceDir) params.append('source_dir', sourceDir);
+            if (codec) params.append('codec', codec);
+
+            document.getElementById('filtered-container').innerHTML = '<div class="loading"><div class="spinner"></div><div style="margin-top: 10px;">Loading filtered files...</div></div>';
+
+            fetch('/api/files/filtered?' + params.toString())
+                .then(r => r.json())
+                .then(files => {
+                    currentFilteredFiles = files;
+                    document.getElementById('filtered-container').innerHTML = renderFilteredFiles(files);
+                    updateSelectedCount();
+                })
+                .catch(err => {
+                    document.getElementById('filtered-container').innerHTML = '<div class="loading" style="color: #f44336;">Error loading files: ' + err.message + '</div>';
+                });
+        }
+
+        function clearFilters() {
+            document.getElementById('filter-needs-convert').checked = true;
+            document.getElementById('filter-min-bitrate').value = '';
+            document.getElementById('filter-max-bitrate').value = '';
+            document.getElementById('filter-min-size').value = '';
+            document.getElementById('filter-max-size').value = '';
+            document.getElementById('filter-source-dir').value = '';
+            document.getElementById('filter-codec').value = '';
+            selectedFiles.clear();
+            document.getElementById('filtered-container').innerHTML = '<div class="loading"><div style="margin-top: 10px; color: #666;">Apply filters to see results</div></div>';
+            updateSelectedCount();
+        }
+
+        function renderFilteredFiles(files) {
+            if (!files || files.length === 0) {
+                return '<div class="empty-state"><div class="empty-state-icon">📄</div><div>No files match the current filters</div><div style="margin-top: 8px; font-size: 12px;">Try adjusting your filter criteria</div></div>';
+            }
+
+            let html = '<ul class="filtered-list">';
+            for (const file of files) {
+                const isSelected = selectedFiles.has(file.id);
+                const codecClass = file.codec ? file.codec.toLowerCase() : '';
+                const bitrateMbps = file.bitrate ? (file.bitrate / 1000000).toFixed(1) : 'N/A';
+
+                html += '<li class="filtered-item' + (isSelected ? ' selected' : '') + '">';
+                html += '<input type="checkbox" class="file-checkbox" data-file-id="' + file.id + '" onchange="toggleFileSelection(' + file.id + ')" ' + (isSelected ? 'checked' : '') + '>';
+                html += '<span class="file-icon">📄</span>';
+                html += '<div class="file-details">';
+                html += '<div class="file-name">' + escapeHtml(file.name) + '</div>';
+                html += '<div class="file-path">' + escapeHtml(file.path) + '</div>';
+                html += '</div>';
+                html += '<div class="file-metadata">';
+                if (file.codec) {
+                    html += '<span class="tree-codec ' + codecClass + '">' + formatCodec(file.codec) + '</span>';
+                }
+                if (file.width && file.height) {
+                    html += '<span>' + file.width + 'x' + file.height + '</span>';
+                }
+                html += '<span>' + bitrateMbps + ' Mbps</span>';
+                html += '<span>' + formatSize(file.size) + '</span>';
+                if (file.duration) {
+                    html += '<span>' + formatTime(file.duration) + '</span>';
+                }
+                if (file.status) {
+                    html += '<span class="tree-status ' + file.status + '">' + file.status + '</span>';
+                }
+                html += '</div>';
+                const dropdownId = 'filtered-profile-' + file.id;
+                html += '<select class="profile-dropdown" id="' + dropdownId + '" onchange="setQualityProfile(' + file.id + ', \'' + escapeHtml(file.path) + '\', false, this.value)">' + renderProfileDropdown(file.quality_profile_id, false) + '</select>';
+                html += '<button class="btn btn-primary btn-small" onclick="convertSingleFile(' + file.id + ', \'' + dropdownId + '\')">Convert</button>';
+                html += '</li>';
+            }
+            html += '</ul>';
+            return html;
+        }
+
+        function toggleFileSelection(fileId) {
+            if (selectedFiles.has(fileId)) {
+                selectedFiles.delete(fileId);
+            } else {
+                selectedFiles.add(fileId);
+            }
+            updateSelectedCount();
+        }
+
+        function toggleSelectAll() {
+            const selectAll = document.getElementById('select-all-files').checked;
+            selectedFiles.clear();
+
+            if (selectAll) {
+                for (const file of currentFilteredFiles) {
+                    selectedFiles.add(file.id);
+                }
+            }
+
+            // Update all checkboxes
+            document.querySelectorAll('.file-checkbox').forEach(checkbox => {
+                checkbox.checked = selectAll;
+                const item = checkbox.closest('.filtered-item');
+                if (item) {
+                    if (selectAll) {
+                        item.classList.add('selected');
+                    } else {
+                        item.classList.remove('selected');
+                    }
+                }
+            });
+
+            updateSelectedCount();
+        }
+
+        function updateSelectedCount() {
+            const count = selectedFiles.size;
+            document.getElementById('selected-count').textContent = count + ' file' + (count !== 1 ? 's' : '') + ' selected';
+            document.getElementById('bulk-convert-btn').disabled = count === 0;
+        }
+
+        function convertSingleFile(fileId, dropdownId) {
+            const dropdown = document.getElementById(dropdownId);
+            const profileId = dropdown ? dropdown.value : 0;
+
+            const formData = {
+                file_ids: [fileId],
+                quality_profile_id: parseInt(profileId) || 0
+            };
+
+            fetch('/api/files/bulk-convert', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(formData)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    showNotification(data.message);
+                    // Refresh the filtered list
+                    applyFilters();
+                } else {
+                    showNotification('Error: ' + data.message, true);
+                }
+            })
+            .catch(err => {
+                showNotification('Error: ' + err.message, true);
+            });
+        }
+
+        function convertSelectedFiles() {
+            if (selectedFiles.size === 0) {
+                showNotification('No files selected', true);
+                return;
+            }
+
+            const bulkProfile = document.getElementById('bulk-profile').value;
+            const profileId = parseInt(bulkProfile) || 0;
+
+            const formData = {
+                file_ids: Array.from(selectedFiles),
+                quality_profile_id: profileId
+            };
+
+            fetch('/api/files/bulk-convert', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(formData)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    showNotification(data.message);
+                    selectedFiles.clear();
+                    document.getElementById('select-all-files').checked = false;
+                    // Refresh the filtered list
+                    applyFilters();
+                } else {
+                    showNotification('Error: ' + data.message, true);
+                }
+            })
+            .catch(err => {
+                showNotification('Error: ' + err.message, true);
+            });
+        }
+
+        // Populate bulk profile dropdown when profiles are loaded
+        document.addEventListener('DOMContentLoaded', () => {
+            // Watch for profile changes to update bulk dropdown
+            const observer = new MutationObserver(() => {
+                if (allProfiles && allProfiles.length > 0) {
+                    const bulkDropdown = document.getElementById('bulk-profile');
+                    if (bulkDropdown) {
+                        bulkDropdown.innerHTML = renderProfileDropdown(0, false);
+                    }
+                }
+            });
+            observer.observe(document.getElementById('profiles-container'), { childList: true, subtree: true });
+        });
     </script>

@@ -117,6 +117,10 @@ func (s *Server) Start(ctx context.Context, port int) error {
 	// Folder quality profile route
 	mux.HandleFunc("/api/folders/set-quality-profile", s.handleSetFolderQualityProfile)
 
+	// Filtered files routes
+	mux.HandleFunc("/api/files/filtered", s.handleFilesFiltered)
+	mux.HandleFunc("/api/files/bulk-convert", s.handleBulkConvert)
+
 	addr := fmt.Sprintf("0.0.0.0:%d", port)
 	server := &http.Server{
 		Addr:              addr,
@@ -1933,6 +1937,178 @@ func (s *Server) handleSetFolderQualityProfile(w http.ResponseWriter, r *http.Re
 	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"message": "Folder quality profile updated successfully",
+	}); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
+}
+
+// FilteredFileItem represents a file with its media info for the filtered files API.
+type FilteredFileItem struct {
+	ID               uint    `json:"id"`
+	Path             string  `json:"path"`
+	Name             string  `json:"name"`
+	Size             int64   `json:"size"`
+	Status           string  `json:"status"`
+	QualityProfileID uint    `json:"quality_profile_id"`
+	Codec            string  `json:"codec,omitempty"`
+	Bitrate          int64   `json:"bitrate,omitempty"`
+	Width            int     `json:"width,omitempty"`
+	Height           int     `json:"height,omitempty"`
+	Duration         float64 `json:"duration,omitempty"`
+}
+
+func (s *Server) handleFilesFiltered(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse query parameters
+	query := r.URL.Query()
+
+	var filters database.FileFilters
+	var err error
+
+	// Needs convert filter
+	filters.NeedsConvert = query.Get("needs_convert") == "true"
+
+	// Bitrate filters (convert from Mbps to bps)
+	if minBitrateStr := query.Get("min_bitrate"); minBitrateStr != "" {
+		var minBitrateMbps float64
+		if _, scanErr := fmt.Sscanf(minBitrateStr, "%f", &minBitrateMbps); scanErr == nil {
+			filters.MinBitrate = int64(minBitrateMbps * 1000000)
+		}
+	}
+	if maxBitrateStr := query.Get("max_bitrate"); maxBitrateStr != "" {
+		var maxBitrateMbps float64
+		if _, scanErr := fmt.Sscanf(maxBitrateStr, "%f", &maxBitrateMbps); scanErr == nil {
+			filters.MaxBitrate = int64(maxBitrateMbps * 1000000)
+		}
+	}
+
+	// Size filters (convert from GB to bytes)
+	if minSizeStr := query.Get("min_size"); minSizeStr != "" {
+		var minSizeGB float64
+		if _, scanErr := fmt.Sscanf(minSizeStr, "%f", &minSizeGB); scanErr == nil {
+			filters.MinSize = int64(minSizeGB * 1024 * 1024 * 1024)
+		}
+	}
+	if maxSizeStr := query.Get("max_size"); maxSizeStr != "" {
+		var maxSizeGB float64
+		if _, scanErr := fmt.Sscanf(maxSizeStr, "%f", &maxSizeGB); scanErr == nil {
+			filters.MaxSize = int64(maxSizeGB * 1024 * 1024 * 1024)
+		}
+	}
+
+	// Source directory filter
+	filters.SourceDir = query.Get("source_dir")
+
+	// Codec filter
+	filters.Codec = query.Get("codec")
+
+	// Get filtered files from database
+	files, err := database.GetFilteredFiles(s.db, filters)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Build response with media info
+	var response []FilteredFileItem
+	for i := range files {
+		item := FilteredFileItem{
+			ID:               files[i].ID,
+			Path:             files[i].Path,
+			Name:             files[i].Name,
+			Size:             files[i].Size,
+			Status:           files[i].Status,
+			QualityProfileID: files[i].QualityProfileID,
+		}
+
+		// Get media info for this file
+		var mediaInfo *database.MediaInfo
+		mediaInfo, err = database.GetMediaInfoByFileID(s.db, files[i].ID)
+		if err == nil {
+			item.Codec = mediaInfo.VideoCodec
+			item.Bitrate = mediaInfo.VideoBitrate
+			item.Width = mediaInfo.Width
+			item.Height = mediaInfo.Height
+			item.Duration = mediaInfo.Duration
+		}
+
+		response = append(response, item)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(response); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
+}
+
+func (s *Server) handleBulkConvert(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse JSON request body
+	var request struct {
+		FileIDs          []uint `json:"file_ids"`
+		QualityProfileID uint   `json:"quality_profile_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if len(request.FileIDs) == 0 {
+		http.Error(w, "No file IDs provided", http.StatusBadRequest)
+		return
+	}
+
+	// Determine which profile to use (0 = use file's assigned profile or default)
+	profileID := request.QualityProfileID
+	if profileID == 0 {
+		// Get default profile
+		var defaultProfile *database.QualityProfile
+		var err error
+		defaultProfile, err = database.GetDefaultQualityProfile(s.db)
+		if err != nil {
+			http.Error(w, "No default quality profile found", http.StatusInternalServerError)
+			return
+		}
+		profileID = defaultProfile.ID
+	}
+
+	// Add each file to the queue
+	successCount := 0
+	for _, fileID := range request.FileIDs {
+		// Get file to check if it exists
+		var file database.File
+		result := s.db.Where("id = ?", fileID).First(&file)
+		if result.Error != nil {
+			continue
+		}
+
+		// Add to queue using file path
+		var queueItemID uint
+		var err error
+		queueItemID, err = s.queueProc.AddFileToQueue(file.Path, profileID)
+		if err == nil {
+			successCount++
+			// Broadcast event for each file
+			s.broadcaster.BroadcastQueueAdded(queueItemID, file.Path)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"count":   successCount,
+		"message": fmt.Sprintf("Added %d file(s) to queue", successCount),
 	}); encodeErr != nil {
 		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
 	}

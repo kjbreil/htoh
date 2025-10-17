@@ -675,3 +675,69 @@ func GetFolderProfileAggregation(db *gorm.DB, folderPath string) (uint, bool, er
 	// Mixed profiles
 	return 0, true, nil
 }
+
+// FileFilters represents filter criteria for querying files.
+type FileFilters struct {
+	NeedsConvert bool   // Only H.264/AVC files eligible for conversion
+	MinBitrate   int64  // Minimum bitrate in bits per second (0 = no filter)
+	MaxBitrate   int64  // Maximum bitrate in bits per second (0 = no filter)
+	MinSize      int64  // Minimum file size in bytes (0 = no filter)
+	MaxSize      int64  // Maximum file size in bytes (0 = no filter)
+	SourceDir    string // Filter by source directory path prefix (empty = no filter)
+	Codec        string // Filter by video codec (empty = no filter)
+}
+
+// GetFilteredFiles retrieves files matching the given filter criteria.
+// Returns files with preloaded MediaInfo and QualityProfile relationships.
+func GetFilteredFiles(db *gorm.DB, filters FileFilters) ([]File, error) {
+	query := db.Preload("QualityProfile").
+		Joins("LEFT JOIN media_infos ON media_infos.file_id = files.id")
+
+	// Apply NeedsConvert filter (H.264/AVC files only)
+	if filters.NeedsConvert {
+		query = query.Where("media_infos.video_codec IN ?", []string{CodecH264, CodecAVC})
+	}
+
+	// Apply codec filter
+	if filters.Codec != "" {
+		query = query.Where("media_infos.video_codec = ?", filters.Codec)
+	}
+
+	// Apply bitrate filters
+	if filters.MinBitrate > 0 {
+		query = query.Where("media_infos.video_bitrate >= ?", filters.MinBitrate)
+	}
+	if filters.MaxBitrate > 0 {
+		query = query.Where("media_infos.video_bitrate <= ?", filters.MaxBitrate)
+	}
+
+	// Apply size filters
+	if filters.MinSize > 0 {
+		query = query.Where("files.size >= ?", filters.MinSize)
+	}
+	if filters.MaxSize > 0 {
+		query = query.Where("files.size <= ?", filters.MaxSize)
+	}
+
+	// Apply source directory filter
+	if filters.SourceDir != "" {
+		query = query.Where("files.path LIKE ?", filters.SourceDir+"%")
+	}
+
+	// Execute query
+	var files []File
+	if err := query.Find(&files).Error; err != nil {
+		return nil, fmt.Errorf("failed to query filtered files: %w", err)
+	}
+
+	// Load media info for each file
+	for i := range files {
+		var mediaInfo MediaInfo
+		if err := db.Where("file_id = ?", files[i].ID).First(&mediaInfo).Error; err == nil {
+			// Store mediaInfo in a way that can be accessed later
+			// We'll include it in the response structure
+		}
+	}
+
+	return files, nil
+}
