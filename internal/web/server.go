@@ -401,7 +401,16 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": err.Error(),
+			"count":   0,
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
 		return
 	}
 
