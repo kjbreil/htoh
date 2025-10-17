@@ -687,22 +687,196 @@ func (s *Server) handleQueueItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleProfiles returns all quality profiles.
+// handleProfiles handles GET (list all profiles) and POST (create profile) on /api/profiles.
 func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	switch r.Method {
+	case http.MethodGet:
+		// List all profiles
+		profiles, err := database.GetAllQualityProfiles(s.db)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(profiles); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+
+	case http.MethodPost:
+		// Create new profile with JSON body
+		s.handleProfileCreateJSON(w, r)
+
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "Method not allowed",
+			"error":   "Only GET and POST methods are supported",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+	}
+}
+
+// handleProfileCreateJSON handles POST requests with JSON body to create a new profile.
+func (s *Server) handleProfileCreateJSON(w http.ResponseWriter, r *http.Request) {
+	// Parse JSON body
+	var reqData struct {
+		Name              string  `json:"name"`
+		Description       string  `json:"description"`
+		Mode              string  `json:"mode"`
+		TargetBitrateBPS  int64   `json:"target_bitrate_bps"`
+		Quality           int     `json:"quality"`
+		BitrateMultiplier float64 `json:"bitrate_multiplier"`
+		IsDefault         bool    `json:"is_default"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&reqData); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "Invalid JSON body",
+			"error":   err.Error(),
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
 		return
 	}
 
-	profiles, err := database.GetAllQualityProfiles(s.db)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// Validate required fields
+	if reqData.Name == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "name is required",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	if reqData.Mode != "vbr" && reqData.Mode != "cbr" && reqData.Mode != "cbr_percent" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "mode must be 'vbr', 'cbr', or 'cbr_percent'",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Mode-specific validation
+	if reqData.Mode == "cbr" && reqData.TargetBitrateBPS <= 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "target_bitrate_bps must be greater than 0 for CBR mode",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	if reqData.Mode == "vbr" && reqData.Quality == 0 && reqData.BitrateMultiplier == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "at least one of quality or bitrate_multiplier must be set for VBR mode",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	if reqData.Mode == "cbr_percent" && reqData.BitrateMultiplier <= 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "bitrate_multiplier must be greater than 0 for CBR_PERCENT mode",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Create profile
+	profile := &database.QualityProfile{
+		Name:              reqData.Name,
+		Description:       reqData.Description,
+		Mode:              reqData.Mode,
+		TargetBitrate:     reqData.TargetBitrateBPS,
+		QualityLevel:      reqData.Quality,
+		BitrateMultiplier: reqData.BitrateMultiplier,
+		IsDefault:         false,
+	}
+
+	// Handle is_default flag
+	if reqData.IsDefault {
+		// Unset other defaults first
+		var err error
+		if err = s.db.Model(&database.QualityProfile{}).
+			Where("is_default = ?", true).
+			Update("is_default", false).Error; err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "failed to unset other defaults",
+				"error":   err.Error(),
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return
+		}
+		profile.IsDefault = true
+	}
+
+	// Save profile
+	var err error
+	if err = database.CreateOrUpdateQualityProfile(s.db, profile); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "failed to create profile",
+			"error":   err.Error(),
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	var encodeErr error
-	if encodeErr = json.NewEncoder(w).Encode(profiles); encodeErr != nil {
+	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Profile created successfully",
+		"profile": profile,
+	}); encodeErr != nil {
 		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
 	}
 }
@@ -774,12 +948,12 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if mode != "vbr" && mode != "cbr" {
+	if mode != "vbr" && mode != "cbr" && mode != "cbr_percent" {
 		w.WriteHeader(http.StatusBadRequest)
 		var encodeErr error
 		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": false,
-			"message": "mode must be 'vbr' or 'cbr'",
+			"message": "mode must be 'vbr', 'cbr', or 'cbr_percent'",
 			"error":   "validation error",
 		}); encodeErr != nil {
 			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
@@ -858,6 +1032,19 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": false,
 			"message": "at least one of quality_level or bitrate_multiplier must be set for VBR mode",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	if mode == "cbr_percent" && bitrateMultiplier <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "bitrate_multiplier must be greater than 0 for CBR_PERCENT mode",
 			"error":   "validation error",
 		}); encodeErr != nil {
 			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
