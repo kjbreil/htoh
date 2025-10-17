@@ -167,144 +167,17 @@ func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, 
 
 		var probeInfo *runner.ProbeInfoDetailed
 		if needsProbe {
-			// Probe the file
-			ctx2, cancel := context.WithTimeout(ctx, 60*time.Second)
-			defer cancel()
-
-			if debug {
-				fmt.Printf("[scan] probing %s\n", p)
-			}
-
-			var pi *runner.ProbeInfoDetailed
-			pi, err = runner.Probe(ctx2, ffprobePath, p)
-			if err != nil {
-				if debug {
-					fmt.Printf("[scan] ffprobe error for %s: %v\n", p, err)
-				}
-				// Store file with failed status
-				file := &database.File{
-					Path:    p,
-					Name:    filepath.Base(p),
-					Size:    fileInfo.Size(),
-					ModTime: fileInfo.ModTime(),
-					Status:  "failed",
-				}
-				_ = database.CreateOrUpdateFile(db, file)
+			probeInfo, existingFile = handleFileProbe(ctx, ffprobePath, p, fileInfo, existingFile, db, debug)
+			if probeInfo == nil {
 				return nil
-			}
-
-			probeInfo = pi
-
-			// Update database with file info
-			file := &database.File{
-				Path:    p,
-				Name:    filepath.Base(p),
-				Size:    fileInfo.Size(),
-				ModTime: fileInfo.ModTime(),
-				Status:  "discovered",
-			}
-			var createErr error
-			if createErr = database.CreateOrUpdateFile(db, file); createErr != nil {
-				if debug {
-					fmt.Printf("[scan] db file update error for %s: %v\n", p, createErr)
-				}
-				return nil
-			}
-
-			// Get the file ID (it was set by CreateOrUpdateFile)
-			existingFile, _ = database.GetFileByPath(db, p)
-
-			// Update database with media info
-			mediaInfo := &database.MediaInfo{
-				FileID:         existingFile.ID,
-				Duration:       probeInfo.Duration,
-				FormatBitrate:  probeInfo.FormatBitrate,
-				Container:      probeInfo.Container,
-				VideoCodec:     probeInfo.VideoCodec,
-				VideoProfile:   probeInfo.VideoProfile,
-				Width:          probeInfo.Width,
-				Height:         probeInfo.Height,
-				CodedWidth:     probeInfo.CodedWidth,
-				CodedHeight:    probeInfo.CodedHeight,
-				FPS:            probeInfo.FPS,
-				AspectRatio:    probeInfo.AspectRatio,
-				VideoBitrate:   probeInfo.VideoBitrate,
-				PixelFormat:    probeInfo.PixelFormat,
-				BitDepth:       probeInfo.BitDepth,
-				ChromaLocation: probeInfo.ChromaLocation,
-				ColorSpace:     probeInfo.ColorSpace,
-				ColorRange:     probeInfo.ColorRange,
-				ColorPrimaries: probeInfo.ColorPrimaries,
-			}
-			var mediaErr error
-			if mediaErr = database.CreateOrUpdateMediaInfo(db, mediaInfo); mediaErr != nil {
-				if debug {
-					fmt.Printf("[scan] db media info update error for %s: %v\n", p, mediaErr)
-				}
 			}
 		}
 
 		// Check if file is eligible for conversion and add to candidate list
 		if needsProbe && probeInfo != nil {
-			// Get MediaInfo for eligibility check
-			var mediaInfo *database.MediaInfo
-			mediaInfo, err = database.GetMediaInfoByFileID(db, existingFile.ID)
-			if err == nil {
-				// Check if file is eligible for conversion
-				if database.IsEligibleForConversion(mediaInfo) {
-					// If file was previously marked as done or failed, reset to discovered
-					// This allows re-transcoding when files are replaced or settings change
-					if existingFile.Status == "done" || existingFile.Status == "failed" {
-						existingFile.Status = "discovered"
-						if updateErr := database.CreateOrUpdateFile(db, existingFile); updateErr != nil && debug {
-							fmt.Printf("[scan] failed to reset status for %s: %v\n", p, updateErr)
-						} else if debug {
-							fmt.Printf("[scan] reset status to discovered for %s (was: done/failed, now eligible)\n", p)
-						}
-					}
-
-					// Convert to old ProbeInfo format for candidate struct
-					oldProbeInfo := &runner.ProbeInfo{
-						VideoCodec: probeInfo.VideoCodec,
-						Width:      probeInfo.Width,
-						Height:     probeInfo.Height,
-						FPS:        probeInfo.FPS,
-						BitRate:    probeInfo.VideoBitrate,
-					}
-					out = append(out, candidate{path: p, info: oldProbeInfo})
-					if debug {
-						fmt.Printf("[scan] queued candidate %s (codec=%s)\n", p, probeInfo.VideoCodec)
-					}
-				}
-			}
+			out = addCandidateFromProbe(db, existingFile, probeInfo, p, out, debug)
 		} else if !needsProbe && existingFile != nil {
-			// Use cached data
-			var mediaInfo *database.MediaInfo
-			mediaInfo, err = database.GetMediaInfoByFileID(db, existingFile.ID)
-			if err == nil {
-				// Check if file is eligible for conversion
-				if database.IsEligibleForConversion(mediaInfo) {
-					// If file was previously marked as done or failed, reset to discovered
-					if existingFile.Status == "done" || existingFile.Status == "failed" {
-						existingFile.Status = "discovered"
-						if updateErr := database.CreateOrUpdateFile(db, existingFile); updateErr != nil && debug {
-							fmt.Printf("[scan] failed to reset status for %s: %v\n", p, updateErr)
-						} else if debug {
-							fmt.Printf("[scan] reset status to discovered for %s (was: done/failed, now eligible)\n", p)
-						}
-					}
-
-					// Convert to old ProbeInfo format for candidate struct
-					oldProbeInfo := &runner.ProbeInfo{
-						VideoCodec: mediaInfo.VideoCodec,
-						Width:      mediaInfo.Width,
-						Height:     mediaInfo.Height,
-						FPS:        mediaInfo.FPS,
-						BitRate:    mediaInfo.VideoBitrate,
-					}
-					out = append(out, candidate{path: p, info: oldProbeInfo})
-				}
-			}
+			out = addCandidateFromCache(db, existingFile, p, out, debug)
 		}
 
 		return nil
@@ -314,4 +187,195 @@ func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, 
 	}
 
 	return out, nil
+}
+
+// handleFileProbe probes a file and updates database with file and media info.
+// Returns probeInfo and existingFile if successful, nil probeInfo on error.
+func handleFileProbe(
+	ctx context.Context,
+	ffprobePath, path string,
+	fileInfo os.FileInfo,
+	existingFile *database.File,
+	db *gorm.DB,
+	debug bool,
+) (*runner.ProbeInfoDetailed, *database.File) {
+	ctx2, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	if debug {
+		fmt.Printf("[scan] probing %s\n", path)
+	}
+
+	probeInfo, err := runner.Probe(ctx2, ffprobePath, path)
+	if err != nil {
+		if debug {
+			fmt.Printf("[scan] ffprobe error for %s: %v\n", path, err)
+		}
+		storeFailedFile(db, path, fileInfo)
+		return nil, existingFile
+	}
+
+	// Update database with file info
+	file := &database.File{
+		ID:               0, // Will be auto-assigned by GORM
+		Path:             path,
+		Name:             filepath.Base(path),
+		Size:             fileInfo.Size(),
+		ModTime:          fileInfo.ModTime(),
+		Status:           "discovered",
+		QualityProfileID: 0, // Will use default when added to queue
+		QualityProfile:   nil,
+		CreatedAt:        time.Time{}, // Will be auto-set by GORM
+		UpdatedAt:        time.Time{}, // Will be auto-set by GORM
+	}
+
+	if createErr := database.CreateOrUpdateFile(db, file); createErr != nil {
+		if debug {
+			fmt.Printf("[scan] db file update error for %s: %v\n", path, createErr)
+		}
+		return nil, existingFile
+	}
+
+	// Get the file ID (it was set by CreateOrUpdateFile)
+	existingFile, _ = database.GetFileByPath(db, path)
+
+	// Update database with media info
+	storeMediaInfo(db, existingFile.ID, probeInfo, debug, path)
+
+	return probeInfo, existingFile
+}
+
+// storeFailedFile stores a file with failed status in the database.
+func storeFailedFile(db *gorm.DB, path string, fileInfo os.FileInfo) {
+	file := &database.File{
+		ID:               0, // Will be auto-assigned by GORM
+		Path:             path,
+		Name:             filepath.Base(path),
+		Size:             fileInfo.Size(),
+		ModTime:          fileInfo.ModTime(),
+		Status:           "failed",
+		QualityProfileID: 0,
+		QualityProfile:   nil,
+		CreatedAt:        time.Time{}, // Will be auto-set by GORM
+		UpdatedAt:        time.Time{}, // Will be auto-set by GORM
+	}
+	_ = database.CreateOrUpdateFile(db, file)
+}
+
+// storeMediaInfo stores media information in the database.
+func storeMediaInfo(db *gorm.DB, fileID uint, probeInfo *runner.ProbeInfoDetailed, debug bool, path string) {
+	mediaInfo := &database.MediaInfo{
+		ID:             0, // Will be auto-assigned by GORM
+		FileID:         fileID,
+		File:           nil, // Will be loaded via Preload when needed
+		Duration:       probeInfo.Duration,
+		FormatBitrate:  probeInfo.FormatBitrate,
+		Container:      probeInfo.Container,
+		VideoCodec:     probeInfo.VideoCodec,
+		VideoProfile:   probeInfo.VideoProfile,
+		Width:          probeInfo.Width,
+		Height:         probeInfo.Height,
+		CodedWidth:     probeInfo.CodedWidth,
+		CodedHeight:    probeInfo.CodedHeight,
+		FPS:            probeInfo.FPS,
+		AspectRatio:    probeInfo.AspectRatio,
+		VideoBitrate:   probeInfo.VideoBitrate,
+		PixelFormat:    probeInfo.PixelFormat,
+		BitDepth:       probeInfo.BitDepth,
+		ChromaLocation: probeInfo.ChromaLocation,
+		ColorSpace:     probeInfo.ColorSpace,
+		ColorRange:     probeInfo.ColorRange,
+		ColorPrimaries: probeInfo.ColorPrimaries,
+		CreatedAt:      time.Time{}, // Will be auto-set by GORM
+		UpdatedAt:      time.Time{}, // Will be auto-set by GORM
+	}
+
+	if mediaErr := database.CreateOrUpdateMediaInfo(db, mediaInfo); mediaErr != nil && debug {
+		fmt.Printf("[scan] db media info update error for %s: %v\n", path, mediaErr)
+	}
+}
+
+// addCandidateFromProbe adds a file to the candidate list using freshly probed data.
+func addCandidateFromProbe(
+	db *gorm.DB,
+	existingFile *database.File,
+	probeInfo *runner.ProbeInfoDetailed,
+	path string,
+	out []candidate,
+	debug bool,
+) []candidate {
+	mediaInfo, err := database.GetMediaInfoByFileID(db, existingFile.ID)
+	if err != nil {
+		return out
+	}
+
+	if !database.IsEligibleForConversion(mediaInfo) {
+		return out
+	}
+
+	// Reset status if file was previously done or failed
+	resetFileStatus(db, existingFile, path, debug)
+
+	// Convert to old ProbeInfo format for candidate struct
+	oldProbeInfo := &runner.ProbeInfo{
+		VideoCodec: probeInfo.VideoCodec,
+		Width:      probeInfo.Width,
+		Height:     probeInfo.Height,
+		FPS:        probeInfo.FPS,
+		BitRate:    probeInfo.VideoBitrate,
+	}
+
+	if debug {
+		fmt.Printf("[scan] queued candidate %s (codec=%s)\n", path, probeInfo.VideoCodec)
+	}
+
+	return append(out, candidate{path: path, info: oldProbeInfo})
+}
+
+// addCandidateFromCache adds a file to the candidate list using cached database data.
+func addCandidateFromCache(
+	db *gorm.DB,
+	existingFile *database.File,
+	path string,
+	out []candidate,
+	debug bool,
+) []candidate {
+	mediaInfo, err := database.GetMediaInfoByFileID(db, existingFile.ID)
+	if err != nil {
+		return out
+	}
+
+	if !database.IsEligibleForConversion(mediaInfo) {
+		return out
+	}
+
+	// Reset status if file was previously done or failed
+	resetFileStatus(db, existingFile, path, debug)
+
+	// Convert to old ProbeInfo format for candidate struct
+	oldProbeInfo := &runner.ProbeInfo{
+		VideoCodec: mediaInfo.VideoCodec,
+		Width:      mediaInfo.Width,
+		Height:     mediaInfo.Height,
+		FPS:        mediaInfo.FPS,
+		BitRate:    mediaInfo.VideoBitrate,
+	}
+
+	return append(out, candidate{path: path, info: oldProbeInfo})
+}
+
+// resetFileStatus resets a file's status to "discovered" if it was previously done or failed.
+func resetFileStatus(db *gorm.DB, file *database.File, path string, debug bool) {
+	if file.Status != "done" && file.Status != "failed" {
+		return
+	}
+
+	file.Status = "discovered"
+	if updateErr := database.CreateOrUpdateFile(db, file); updateErr != nil {
+		if debug {
+			fmt.Printf("[scan] failed to reset status for %s: %v\n", path, updateErr)
+		}
+	} else if debug {
+		fmt.Printf("[scan] reset status to discovered for %s (was: done/failed, now eligible)\n", path)
+	}
 }

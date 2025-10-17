@@ -31,6 +31,7 @@ func (s *stringSlice) Set(value string) error {
 	return nil
 }
 
+//nolint:gochecknoglobals // CLI flag variables must be global for flag package
 var (
 	sourceDirs   stringSlice
 	workDir      = flag.String("w", "", "Working directory (temp/state & outputs)")
@@ -73,7 +74,7 @@ func main() {
 	flag.Var(&sourceDirs, "s", "Source directory of videos (can be specified multiple times)")
 	flag.Parse()
 	if *version {
-		fmt.Println("opti", Version)
+		fmt.Fprintf(os.Stdout, "opti %s\n", Version)
 		return
 	}
 
@@ -83,7 +84,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "opti: failed to generate config: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Generated default config file at: %s\n", *generateConfig)
+		fmt.Fprintf(os.Stdout, "Generated default config file at: %s\n", *generateConfig)
+
 		return
 	}
 
@@ -161,7 +163,7 @@ func main() {
 		os.Exit(1)
 	}
 	if !cfg.Silent {
-		fmt.Println("Database initialized.")
+		fmt.Fprintf(os.Stdout, "Database initialized.\n")
 	}
 
 	// Create queue processor
@@ -218,13 +220,13 @@ func main() {
 	// Wait for shutdown signal
 	<-sigChan
 	if !cfg.Silent {
-		fmt.Println("\nShutting down...")
+		fmt.Fprintf(os.Stdout, "\nShutting down...\n")
 	}
 	cancel()
 
 	// Wait for all goroutines to finish
 	wg.Wait()
 	if !cfg.Silent {
-		fmt.Println("Shutdown complete.")
+		fmt.Fprintf(os.Stdout, "Shutdown complete.\n")
 	}
 }

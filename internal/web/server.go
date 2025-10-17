@@ -181,54 +181,57 @@ type FolderStats struct {
 func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 
-	if path == "" {
-		// No specific path - return tree(s) for all source directories
-		if len(s.cfg.SourceDirs) == 0 {
-			http.Error(w, "No source directories configured", http.StatusInternalServerError)
-			return
-		}
+	if path != "" {
+		s.handleSingleTreePath(w, path)
+		return
+	}
 
-		if len(s.cfg.SourceDirs) == 1 {
-			// Single source directory - return single TreeNode for backward compatibility
-			tree, err := s.buildTree(s.cfg.SourceDirs[0])
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			var encodeErr error
-			if encodeErr = json.NewEncoder(w).Encode(tree); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
-			}
-		} else {
-			// Multiple source directories - return array of TreeNode
-			var trees []TreeNode
-			for _, sourceDir := range s.cfg.SourceDirs {
-				tree, err := s.buildTree(sourceDir)
-				if err != nil {
-					// Log error but continue with other directories
-					continue
-				}
-				trees = append(trees, *tree)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			var encodeErr error
-			if encodeErr = json.NewEncoder(w).Encode(trees); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
-			}
-		}
-	} else {
-		// Specific path provided - return single TreeNode
-		tree, err := s.buildTree(path)
+	// No specific path - return tree(s) for all source directories
+	if len(s.cfg.SourceDirs) == 0 {
+		http.Error(w, "No source directories configured", http.StatusInternalServerError)
+		return
+	}
+
+	if len(s.cfg.SourceDirs) == 1 {
+		s.handleSingleTreePath(w, s.cfg.SourceDirs[0])
+		return
+	}
+
+	// Multiple source directories - return array of TreeNode
+	s.handleMultipleTreePaths(w)
+}
+
+// handleSingleTreePath returns a single tree for a specific path.
+func (s *Server) handleSingleTreePath(w http.ResponseWriter, path string) {
+	tree, err := s.buildTree(path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(tree); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
+}
+
+// handleMultipleTreePaths returns trees for all source directories.
+func (s *Server) handleMultipleTreePaths(w http.ResponseWriter) {
+	trees := make([]TreeNode, 0, len(s.cfg.SourceDirs))
+	for _, sourceDir := range s.cfg.SourceDirs {
+		tree, err := s.buildTree(sourceDir)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			// Log error but continue with other directories
+			continue
 		}
-		w.Header().Set("Content-Type", "application/json")
-		var encodeErr error
-		if encodeErr = json.NewEncoder(w).Encode(tree); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
-		}
+		trees = append(trees, *tree)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(trees); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
 	}
 }
 
@@ -1268,7 +1271,8 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle is_default flag
-	if isDefaultStr == "true" {
+	switch isDefaultStr {
+	case "true":
 		// Unset other defaults first
 		if err = s.db.Model(&database.QualityProfile{}).
 			Where("is_default = ?", true).
@@ -1285,7 +1289,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		profile.IsDefault = true
-	} else if isDefaultStr == "false" {
+	case "false":
 		profile.IsDefault = false
 	}
 
@@ -1466,7 +1470,7 @@ func (s *Server) handleProfileByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut:
 		s.handleProfileUpdateJSON(w, r, profileID)
 	case http.MethodDelete:
-		s.handleProfileDeleteByID(w, r, profileID)
+		s.handleProfileDeleteByID(w, profileID)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -1607,7 +1611,7 @@ func (s *Server) handleProfileUpdateJSON(w http.ResponseWriter, r *http.Request,
 }
 
 // handleProfileDeleteByID handles DELETE requests to delete a profile.
-func (s *Server) handleProfileDeleteByID(w http.ResponseWriter, r *http.Request, profileID uint) {
+func (s *Server) handleProfileDeleteByID(w http.ResponseWriter, profileID uint) {
 	// Delete profile
 	if err := database.DeleteQualityProfile(s.db, profileID); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -1636,101 +1640,44 @@ func (s *Server) handleProfileDeleteByID(w http.ResponseWriter, r *http.Request,
 	}
 }
 
-// handleProfileSetDefault handles POST requests to set a profile as default.
-func (s *Server) handleProfileSetDefault(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Extract ID from URL path (e.g., /api/profiles/123/default -> 123)
-	pathPrefix := "/api/profiles/"
-	pathSuffix := "/default"
-	if !strings.HasPrefix(r.URL.Path, pathPrefix) || !strings.HasSuffix(r.URL.Path, pathSuffix) {
-		http.Error(w, "Invalid path", http.StatusBadRequest)
-		return
-	}
-
-	idStr := strings.TrimPrefix(r.URL.Path, pathPrefix)
-	idStr = strings.TrimSuffix(idStr, pathSuffix)
-
-	if idStr == "" {
-		http.Error(w, "Profile ID is required", http.StatusBadRequest)
-		return
-	}
-
-	var id uint64
+// parseQualityProfileID parses and validates a quality_profile_id from query string.
+// Returns the parsed ID (0 if empty) and true if valid, or false with error response written.
+func (s *Server) parseQualityProfileID(w http.ResponseWriter, qualityProfileIDStr string) (uint64, bool) {
+	var qualityProfileID uint64
 	var err error
-	if _, err = fmt.Sscanf(idStr, "%d", &id); err != nil {
-		http.Error(w, "Invalid profile ID", http.StatusBadRequest)
-		return
-	}
 
-	// Check for overflow when converting uint64 to uint
-	if id > uint64(^uint(0)) {
-		http.Error(w, "Profile ID too large", http.StatusBadRequest)
-		return
-	}
-
-	profileID := uint(id)
-
-	// Load profile
-	profile, err := database.GetQualityProfileByID(s.db, profileID)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		var encodeErr error
-		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"message": "Profile not found",
-			"error":   err.Error(),
-		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	if qualityProfileIDStr != "" {
+		if _, err = fmt.Sscanf(qualityProfileIDStr, "%d", &qualityProfileID); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "invalid quality_profile_id",
+				"error":   "validation error",
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return 0, false
 		}
-		return
-	}
 
-	// Unset other defaults first
-	if err = s.db.Model(&database.QualityProfile{}).
-		Where("is_default = ?", true).
-		Update("is_default", false).Error; err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		var encodeErr error
-		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"message": "failed to unset other defaults",
-			"error":   err.Error(),
-		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		// Check for overflow when converting uint64 to uint
+		if qualityProfileID > uint64(^uint(0)) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "quality_profile_id too large",
+				"error":   "validation error",
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return 0, false
 		}
-		return
 	}
 
-	// Set this profile as default
-	profile.IsDefault = true
-	if err = database.CreateOrUpdateQualityProfile(s.db, profile); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		var encodeErr error
-		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"message": "failed to set default profile",
-			"error":   err.Error(),
-		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
-		}
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	var encodeErr error
-	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"message": "Default profile updated successfully",
-	}); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
-	}
+	return qualityProfileID, true
 }
 
 // handleSetFileQualityProfile handles POST requests to set a file's preferred quality profile.
@@ -1791,36 +1738,9 @@ func (s *Server) handleSetFileQualityProfile(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Parse quality profile ID (defaults to 0 if empty, which means "use default")
-	var qualityProfileID uint64
-	if qualityProfileIDStr != "" {
-		if _, err = fmt.Sscanf(qualityProfileIDStr, "%d", &qualityProfileID); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			var encodeErr error
-			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": "invalid quality_profile_id",
-				"error":   "validation error",
-			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
-			}
-			return
-		}
-
-		// Check for overflow when converting uint64 to uint
-		if qualityProfileID > uint64(^uint(0)) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			var encodeErr error
-			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": "quality_profile_id too large",
-				"error":   "validation error",
-			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
-			}
-			return
-		}
+	qualityProfileID, ok := s.parseQualityProfileID(w, qualityProfileIDStr)
+	if !ok {
+		return
 	}
 
 	// Update the file's quality profile preference
@@ -1874,39 +1794,12 @@ func (s *Server) handleSetFolderQualityProfile(w http.ResponseWriter, r *http.Re
 	}
 
 	// Parse quality profile ID (defaults to 0 if empty, which means "use default")
-	var qualityProfileID uint64
-	var err error
-	if qualityProfileIDStr != "" {
-		if _, err = fmt.Sscanf(qualityProfileIDStr, "%d", &qualityProfileID); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			var encodeErr error
-			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": "invalid quality_profile_id",
-				"error":   "validation error",
-			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
-			}
-			return
-		}
-
-		// Check for overflow when converting uint64 to uint
-		if qualityProfileID > uint64(^uint(0)) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			var encodeErr error
-			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": "quality_profile_id too large",
-				"error":   "validation error",
-			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
-			}
-			return
-		}
+	qualityProfileID, ok := s.parseQualityProfileID(w, qualityProfileIDStr)
+	if !ok {
+		return
 	}
 
+	var err error
 	// Update the folder's quality profile (cascades to all files below)
 	if err = database.UpdateFolderQualityProfile(s.db, folderPath, uint(qualityProfileID)); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -2013,8 +1906,8 @@ func (s *Server) handleFilesFiltered(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build response with media info
-	var response []FilteredFileItem
+	// Build response with media info (preallocate for known size)
+	response := make([]FilteredFileItem, 0, len(files))
 	for i := range files {
 		item := FilteredFileItem{
 			ID:               files[i].ID,

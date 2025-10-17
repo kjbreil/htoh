@@ -48,8 +48,8 @@ func NormalizeConfig(cfg *Config) {
 	cfg.FFprobePath = ffprobePath
 
 	if cfg.Debug {
-		fmt.Printf("Using ffmpeg: %s\n", cfg.FFmpegPath)
-		fmt.Printf("Using ffprobe: %s\n", cfg.FFprobePath)
+		fmt.Fprintf(os.Stderr, "Using ffmpeg: %s\n", cfg.FFmpegPath)
+		fmt.Fprintf(os.Stderr, "Using ffprobe: %s\n", cfg.FFprobePath)
 	}
 }
 

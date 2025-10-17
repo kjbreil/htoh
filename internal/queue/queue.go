@@ -45,9 +45,12 @@ type QueueProcessor struct {
 // NewQueueProcessor creates a new queue processor.
 func NewQueueProcessor(db *gorm.DB, cfg config.Config) *QueueProcessor {
 	return &QueueProcessor{
-		db:     db,
-		cfg:    cfg,
-		active: make(map[uint]bool),
+		db:              db,
+		cfg:             cfg,
+		mu:              sync.RWMutex{},
+		active:          make(map[uint]bool),
+		broadcaster:     nil, // Set via SetBroadcaster
+		htmlBroadcaster: nil, // Set via SetHTMLBroadcaster
 	}
 }
 
@@ -79,6 +82,78 @@ func (qp *QueueProcessor) logAndBroadcast(queueItemID, fileID uint, logLevel, me
 	if qp.broadcaster != nil {
 		qp.broadcaster.BroadcastTaskLog(queueItemID, fileID, logLevel, message, time.Now().Format(time.RFC3339))
 	}
+}
+
+// broadcastProgressLoop broadcasts progress updates for a transcoding task.
+func (qp *QueueProcessor) broadcastProgressLoop(
+	ctx context.Context,
+	queueItemID, fileID uint,
+	workerID int,
+	prog *progress.Prog,
+) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			qp.broadcastProgressUpdate(queueItemID, fileID, workerID, prog)
+		}
+	}
+}
+
+// broadcastProgressUpdate broadcasts a single progress update.
+func (qp *QueueProcessor) broadcastProgressUpdate(
+	queueItemID, fileID uint,
+	workerID int,
+	prog *progress.Prog,
+) {
+	if qp.broadcaster == nil {
+		return
+	}
+
+	row := prog.GetProgress(workerID)
+	if row == nil {
+		return
+	}
+
+	// Only broadcast if we have meaningful progress data
+	if row.FPS <= 0 && row.OutTimeS <= 0 {
+		return
+	}
+
+	// Calculate elapsed time and ETA
+	elapsed, eta := qp.calculateProgressTimes(row)
+
+	qp.broadcaster.BroadcastProgressUpdate(
+		queueItemID,
+		fileID,
+		row.FPS,
+		row.Speed,
+		row.OutTimeS,
+		row.SizeBytes,
+		row.Device,
+		elapsed,
+		eta,
+	)
+}
+
+// calculateProgressTimes calculates elapsed time and ETA from a progress row.
+func (qp *QueueProcessor) calculateProgressTimes(row *progress.Row) (elapsed, eta float64) {
+	if row.StartTime.IsZero() {
+		return 0, 0
+	}
+
+	elapsed = time.Since(row.StartTime).Seconds()
+
+	// Calculate ETA only if we have meaningful progress
+	if row.OutTimeS > 0 && row.DurationS > row.OutTimeS {
+		eta = elapsed * (row.DurationS - row.OutTimeS) / row.OutTimeS
+	}
+
+	return elapsed, eta
 }
 
 // Start begins processing the queue.
@@ -187,7 +262,7 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *d
 	qp.logAndBroadcast(item.ID, item.FileID, "info", fmt.Sprintf("Task started on worker %d", workerID))
 
 	if !qp.cfg.Silent {
-		fmt.Printf("[worker %d] Processing: %s\n", workerID, item.File.Name)
+		fmt.Fprintf(os.Stdout, "[worker %d] Processing: %s\n", workerID, item.File.Name)
 	}
 
 	// Get media info for the file
@@ -300,11 +375,12 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *d
 	// Create job
 	job := runner.Job{
 		Src:       item.File.Path,
+		Rel:       "", // Not used in queue mode
 		Probe:     probeInfo,
 		OutTarget: outTarget,
-		Quality:   quality,
 		Container: container,
 		Faststart: faststart,
+		Quality:   quality,
 	}
 
 	// Create a simple progress tracker (no live dashboard for queue mode)
@@ -320,45 +396,7 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *d
 	progressCtx, cancelProgress := context.WithCancel(ctx)
 	defer cancelProgress()
 
-	go func() {
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-progressCtx.Done():
-				return
-			case <-ticker.C:
-				// Get current progress from prog
-				if row := prog.GetProgress(workerID); row != nil && qp.broadcaster != nil {
-					// Only broadcast if we have meaningful progress data
-					if row.FPS > 0 || row.OutTimeS > 0 {
-						// Calculate elapsed time and ETA
-						var elapsed, eta float64
-						if !row.StartTime.IsZero() {
-							elapsed = time.Since(row.StartTime).Seconds()
-							// Calculate ETA only if we have meaningful progress
-							if row.OutTimeS > 0 && row.DurationS > row.OutTimeS {
-								eta = elapsed * (row.DurationS - row.OutTimeS) / row.OutTimeS
-							}
-						}
-
-						qp.broadcaster.BroadcastProgressUpdate(
-							item.ID,
-							item.FileID,
-							row.FPS,
-							row.Speed,
-							row.OutTimeS,
-							row.SizeBytes,
-							row.Device,
-							elapsed,
-							eta,
-						)
-					}
-				}
-			}
-		}
-	}()
+	go qp.broadcastProgressLoop(progressCtx, item.ID, item.FileID, workerID, prog)
 
 	// Transcode
 	qp.logAndBroadcast(item.ID, item.FileID, "info", "Starting transcoding...")
@@ -397,8 +435,7 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *d
 			fmt.Sprintf("Failed to stat converted file: %v", statErr))
 	} else {
 		// Update File record with new size and modtime
-		var updateErr error
-		updateErr = qp.db.Model(&database.File{}).
+		var updateErr = qp.db.Model(&database.File{}).
 			Where("id = ?", item.FileID).
 			Updates(map[string]interface{}{
 				"size":     fileInfo.Size(),
@@ -421,7 +458,9 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *d
 	} else {
 		// Update MediaInfo record with new codec information
 		updatedMediaInfo := &database.MediaInfo{
+			ID:             0, // Will be set by CreateOrUpdateMediaInfo
 			FileID:         item.FileID,
+			File:           nil, // Will be loaded via Preload when needed
 			Duration:       probeResult.Duration,
 			FormatBitrate:  probeResult.FormatBitrate,
 			Container:      probeResult.Container,
@@ -440,6 +479,8 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *d
 			ColorSpace:     probeResult.ColorSpace,
 			ColorRange:     probeResult.ColorRange,
 			ColorPrimaries: probeResult.ColorPrimaries,
+			CreatedAt:      time.Time{}, // Will be auto-set by GORM
+			UpdatedAt:      time.Time{}, // Will be auto-set by GORM
 		}
 
 		var saveErr error
@@ -476,7 +517,7 @@ func (qp *QueueProcessor) processItem(ctx context.Context, workerID int, item *d
 	qp.logAndBroadcast(item.ID, item.FileID, "info", "Task completed successfully")
 
 	if !qp.cfg.Silent {
-		fmt.Printf("[worker %d] Completed: %s\n", workerID, item.File.Name)
+		fmt.Fprintf(os.Stdout, "[worker %d] Completed: %s\n", workerID, item.File.Name)
 	}
 }
 
@@ -530,7 +571,11 @@ func (qp *QueueProcessor) AddFileToQueue(filePath string, qualityProfileID uint)
 	}
 
 	// Add to queue
-	return database.AddToQueue(qp.db, file.ID, 0, profileID)
+	queueItemID, err := database.AddToQueue(qp.db, file.ID, 0, profileID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to add file to queue: %w", err)
+	}
+	return queueItemID, nil
 }
 
 // AddFolderToQueue adds all eligible files in a folder to the queue.

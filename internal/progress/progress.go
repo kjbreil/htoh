@@ -28,14 +28,31 @@ type Row struct {
 	DurationS float64   // total video duration in seconds
 }
 
-func NewProg() *Prog { return &Prog{rows: make(map[int]*Row)} }
+func NewProg() *Prog {
+	return &Prog{
+		mu:   sync.RWMutex{},
+		rows: make(map[int]*Row),
+	}
+}
 
 func (p *Prog) Update(wid int, upd func(r *Row)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	r := p.rows[wid]
 	if r == nil {
-		r = &Row{WorkerID: wid}
+		r = &Row{
+			WorkerID:  wid,
+			FileBase:  "",
+			Phase:     "",
+			FPS:       0,
+			Speed:     "",
+			OutTimeS:  0,
+			SizeBytes: 0,
+			Device:    "",
+			Err:       "",
+			StartTime: time.Time{},
+			DurationS: 0,
+		}
 		p.rows[wid] = r
 	}
 	upd(r)
@@ -109,16 +126,23 @@ func (p *Prog) renderOnce() {
 	}
 
 	// Header
+	//nolint:forbidigo // Live dashboard UI output to stdout
 	fmt.Println("Workers live status (updates ~3/sec)")
 	if hasDevice {
+		//nolint:forbidigo // Live dashboard UI output to stdout
 		fmt.Println(strings.Repeat("─", 105))
+		//nolint:forbidigo // Live dashboard UI output to stdout
 		fmt.Printf("%-6s  %-10s  %-28s  %7s  %6s  %8s  %8s  %-12s\n",
 			"WID", "PHASE", "FILE", "FPS", "SPEED", "TIME", "SIZE", "DEVICE")
+		//nolint:forbidigo // Live dashboard UI output to stdout
 		fmt.Println(strings.Repeat("─", 105))
 	} else {
+		//nolint:forbidigo // Live dashboard UI output to stdout
 		fmt.Println(strings.Repeat("─", 90))
+		//nolint:forbidigo // Live dashboard UI output to stdout
 		fmt.Printf("%-6s  %-10s  %-38s  %7s  %6s  %8s  %8s\n",
 			"WID", "PHASE", "FILE", "FPS", "SPEED", "TIME", "SIZE")
+		//nolint:forbidigo // Live dashboard UI output to stdout
 		fmt.Println(strings.Repeat("─", 90))
 	}
 
@@ -140,19 +164,24 @@ func (p *Prog) renderOnce() {
 		}
 
 		if hasDevice {
+			//nolint:forbidigo // Live dashboard UI output to stdout
 			fmt.Printf("%-6d  %-10s  %-28s  %7.2f  %6s  %8s  %8s  %-12s\n",
 				r.WorkerID, r.Phase, file, r.FPS, r.Speed, times, size, r.Device)
 		} else {
+			//nolint:forbidigo // Live dashboard UI output to stdout
 			fmt.Printf("%-6d  %-10s  %-38s  %7.2f  %6s  %8s  %8s\n",
 				r.WorkerID, r.Phase, file, r.FPS, r.Speed, times, size)
 		}
 	}
 
 	if hasDevice {
+		//nolint:forbidigo // Live dashboard UI output to stdout
 		fmt.Println(strings.Repeat("─", 105))
 	} else {
+		//nolint:forbidigo // Live dashboard UI output to stdout
 		fmt.Println(strings.Repeat("─", 90))
 	}
+	//nolint:forbidigo // Live dashboard UI output to stdout
 	fmt.Println("Hints: -S to hide non-table logs | Ctrl+C stops after current tick")
 }
 

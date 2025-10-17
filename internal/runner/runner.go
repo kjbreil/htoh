@@ -406,7 +406,14 @@ func buildVideoToolboxArgs(job Job) []string {
 	return args
 }
 
-func Transcode(ctx context.Context, cfg config.Config, jb Job, workerID int, prog *progress.Prog, logFunc func(string)) error {
+func Transcode(
+	ctx context.Context,
+	cfg config.Config,
+	jb Job,
+	workerID int,
+	prog *progress.Prog,
+	logFunc func(string),
+) error {
 	if err := os.MkdirAll(cfg.WorkDir, 0o750); err != nil {
 		return fmt.Errorf("failed to create work directory %s: %w", cfg.WorkDir, err)
 	}
@@ -542,30 +549,40 @@ func validateVAAPIDevice(device string) (string, error) {
 	}
 
 	// Check if device exists and is accessible
-	if _, err := os.Stat(device); err != nil {
-		if os.IsNotExist(err) {
-			// Try to list available devices for helpful error message
-			entries, _ := os.ReadDir("/dev/dri")
-			var available []string
-			for _, e := range entries {
-				name := e.Name()
-				if strings.HasPrefix(name, "renderD") {
-					available = append(available, "/dev/dri/"+name)
-				}
-			}
-			if len(available) > 0 {
-				return "", fmt.Errorf(
-					"VAAPI device %q not found; available devices: %s",
-					device,
-					strings.Join(available, ", "),
-				)
-			}
-			return "", fmt.Errorf("VAAPI device %q not found and no renderD devices found in /dev/dri", device)
-		}
+	_, err := os.Stat(device)
+	if err == nil {
+		return device, nil
+	}
+
+	// Device not accessible - provide helpful error
+	if !os.IsNotExist(err) {
 		return "", fmt.Errorf("VAAPI device %q not accessible: %w", device, err)
 	}
 
-	return device, nil
+	// Device doesn't exist - list available alternatives
+	return "", buildVAAPIDeviceNotFoundError(device)
+}
+
+// buildVAAPIDeviceNotFoundError creates an error with available VAAPI devices listed.
+func buildVAAPIDeviceNotFoundError(device string) error {
+	entries, _ := os.ReadDir("/dev/dri")
+	var available []string
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, "renderD") {
+			available = append(available, "/dev/dri/"+name)
+		}
+	}
+
+	if len(available) > 0 {
+		return fmt.Errorf(
+			"VAAPI device %q not found; available devices: %s",
+			device,
+			strings.Join(available, ", "),
+		)
+	}
+
+	return fmt.Errorf("VAAPI device %q not found and no renderD devices found in /dev/dri", device)
 }
 
 // detectGPUVendor reads the GPU vendor ID from sysfs for the given VAAPI device.

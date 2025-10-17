@@ -35,22 +35,31 @@ func PrintHardwareCaps(ffmpegPath string) error {
 	}
 
 	engineOpts := engineOptionsFromEncoders(encoders)
+	//nolint:forbidigo // CLI output function - legitimate use of fmt.Println for user-facing output
 	fmt.Println("Engines available for -engine with this ffmpeg build:")
 	for _, opt := range engineOpts {
+		//nolint:forbidigo // CLI output function - legitimate use of fmt.Printf for user-facing output
 		fmt.Printf("  %-6s %s\n", opt.Name, opt.Description)
 	}
+	//nolint:forbidigo // CLI output function - legitimate use of fmt.Println for user-facing output
 	fmt.Println()
 
+	//nolint:forbidigo // CLI output function - legitimate use of fmt.Println for user-facing output
 	fmt.Println("Hardware accelerators reported by ffmpeg:")
+	//nolint:forbidigo // CLI output function - legitimate use of fmt.Println for user-facing output
 	fmt.Println(strings.TrimSpace(accels))
+	//nolint:forbidigo // CLI output function - legitimate use of fmt.Println for user-facing output
 	fmt.Println()
 
+	//nolint:forbidigo // CLI output function - legitimate use of fmt.Println for user-facing output
 	fmt.Println("HEVC hardware encoders detected (from ffmpeg -encoders):")
 	hwEnc := filterHEVCHardwareEncoders(encoders)
 	for _, line := range hwEnc {
+		//nolint:forbidigo // CLI output function - legitimate use of fmt.Println for user-facing output
 		fmt.Println("  " + line)
 	}
 	if len(hwEnc) == 0 {
+		//nolint:forbidigo // CLI output function - legitimate use of fmt.Println for user-facing output
 		fmt.Println("  (none detected)")
 	}
 	return nil
