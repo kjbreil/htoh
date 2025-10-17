@@ -17,6 +17,7 @@ import (
 	"github.com/kjbreil/opti/internal/runner"
 	"github.com/kjbreil/opti/internal/scanner"
 	"github.com/kjbreil/opti/internal/web"
+	"gorm.io/gorm"
 )
 
 // stringSlice is a custom flag type that allows multiple values.
@@ -39,7 +40,7 @@ var (
 	keep         = flag.Bool("k", false, "Keep intermediates (reserved)")
 	silent       = flag.Bool("S", false, "Silent (less console output)")
 	workers      = flag.Int("j", 1, "Parallel workers")
-	scanInterval = flag.Int("scan-interval", 5, "Minutes between scans (0 = scan once and exit)")
+	scanInterval = flag.Int("scan-interval", defaultScanInterval, "Minutes between scans (0 = scan once and exit)")
 	engine       = flag.String("engine", "cpu", "Engine: cpu|qsv|nvenc|vaapi|videotoolbox")
 	device       = flag.String("device", "", "Hardware device path for VAAPI (default: /dev/dri/renderD128)")
 	ffmpegPath   = flag.String("ffmpeg", "ffmpeg", "Path to ffmpeg binary")
@@ -65,28 +66,53 @@ var (
 	configPath     = flag.String("c", "", "Path to TOML config file (config values override CLI flags)")
 	configPathLong = flag.String("config", "", "Path to TOML config file (same as -c)")
 	generateConfig = flag.String("generate-config", "", "Generate a default config file at the specified path and exit")
-	port           = flag.Int("port", 8181, "HTTP server port for web interface")
+	port           = flag.Int("port", defaultWebPort, "HTTP server port for web interface")
 )
 
-const Version = "0.3.3"
+const (
+	Version = "0.3.3"
+
+	// Default configuration values.
+	defaultScanInterval = 5    // minutes between scans
+	defaultWebPort      = 8181 // HTTP server port
+
+	// Exit codes.
+	exitCodeUsageError = 2
+)
 
 func main() {
 	flag.Var(&sourceDirs, "s", "Source directory of videos (can be specified multiple times)")
 	flag.Parse()
-	if *version {
-		fmt.Fprintf(os.Stdout, "opti %s\n", Version)
+
+	if handleEarlyExitFlags() {
 		return
 	}
 
-	// Handle --generate-config flag
+	cfg := loadAndMergeConfig()
+	validateAndNormalizeConfig(&cfg)
+
+	db := initializeDatabase(cfg)
+	queueProc := queue.NewQueueProcessor(db, cfg)
+	webServer := createWebServer(db, cfg, queueProc)
+
+	runServicesUntilShutdown(cfg, webServer, queueProc, db)
+}
+
+// handleEarlyExitFlags handles flags that cause early exit (version, generate-config, list-hw).
+// Returns true if the program should exit.
+func handleEarlyExitFlags() bool {
+	if *version {
+		fmt.Fprintf(os.Stdout, "opti %s\n", Version)
+		return true
+	}
+
 	if *generateConfig != "" {
 		if err := config.GenerateDefault(*generateConfig); err != nil {
 			fmt.Fprintf(os.Stderr, "opti: failed to generate config: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stdout, "Generated default config file at: %s\n", *generateConfig)
-
-		return
+		return true
 	}
 
 	if *listHW {
@@ -94,28 +120,49 @@ func main() {
 			fmt.Fprintln(os.Stderr, "opti:", err)
 			os.Exit(1)
 		}
-		return
+		return true
 	}
 
-	// Load config from file if specified
-	// Support both -c and --config flags (--config takes precedence if both are set)
-	configFilePath := *configPath
+	return false
+}
+
+// loadAndMergeConfig loads configuration from file (if specified) and merges with CLI flags.
+func loadAndMergeConfig() config.Config {
+	configFilePath := getConfigFilePath()
+	loadedConfig := loadConfigFile(configFilePath)
+	cliConfig := buildCLIConfig()
+
+	if loadedConfig != nil {
+		return *config.MergeConfigs(loadedConfig, &cliConfig)
+	}
+	return cliConfig
+}
+
+// getConfigFilePath returns the config file path, preferring --config over -c.
+func getConfigFilePath() string {
 	if *configPathLong != "" {
-		configFilePath = *configPathLong
+		return *configPathLong
+	}
+	return *configPath
+}
+
+// loadConfigFile loads config from file if path is provided.
+func loadConfigFile(path string) *config.Config {
+	if path == "" {
+		return nil
 	}
 
-	var loadedConfig *config.Config
-	if configFilePath != "" {
-		var err error
-		loadedConfig, err = config.LoadFromFile(configFilePath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "opti: failed to load config file: %v\n", err)
-			os.Exit(1)
-		}
+	cfg, err := config.LoadFromFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "opti: failed to load config file: %v\n", err)
+		os.Exit(1)
 	}
+	return cfg
+}
 
-	// Build CLI flags config
-	cliConfig := config.Config{
+// buildCLIConfig constructs config from CLI flags.
+func buildCLIConfig() config.Config {
+	return config.Config{
 		SourceDirs:   sourceDirs,
 		WorkDir:      *workDir,
 		Interactive:  *interactive,
@@ -132,62 +179,85 @@ func main() {
 		FaststartMP4: *faststartMP4,
 		FastMode:     *fastMode,
 	}
+}
 
-	// Merge configs if a config file was loaded
-	// CLI flags take precedence over config file values
-	cfg := cliConfig
-	if loadedConfig != nil {
-		cfg = *config.MergeConfigs(loadedConfig, &cliConfig)
-	}
-
-	// Validate merged configuration
+// validateAndNormalizeConfig validates and normalizes the configuration.
+func validateAndNormalizeConfig(cfg *config.Config) {
 	if err := runner.ValidateEngine(cfg.Engine, cfg.FFmpegPath); err != nil {
 		fmt.Fprintln(os.Stderr, "opti:", err)
 		os.Exit(1)
 	}
+
 	if len(cfg.SourceDirs) == 0 || cfg.WorkDir == "" {
 		fmt.Fprintln(os.Stderr, "usage: -s <source> -w <workdir> [options]")
-		os.Exit(2)
+		os.Exit(exitCodeUsageError)
 	}
+
 	if cfg.Workers <= 0 {
 		cfg.Workers = 1
 	}
 
-	// Normalize config paths (set defaults for ffmpeg/ffprobe)
-	config.NormalizeConfig(&cfg)
+	config.NormalizeConfig(cfg)
+}
 
-	// Initialize database
+// initializeDatabase initializes the database and returns the connection.
+func initializeDatabase(cfg config.Config) *gorm.DB {
 	db, err := database.InitDB(cfg.WorkDir, cfg.Debug)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "opti: failed to initialize database: %v\n", err)
 		os.Exit(1)
 	}
+
 	if !cfg.Silent {
 		fmt.Fprintf(os.Stdout, "Database initialized.\n")
 	}
 
-	// Create queue processor
-	queueProc := queue.NewQueueProcessor(db, cfg)
+	return db
+}
 
-	// Create web server
+// createWebServer creates and initializes the web server.
+func createWebServer(db *gorm.DB, cfg config.Config, queueProc *queue.Processor) *web.Server {
 	webServer, err := web.NewServer(db, cfg, queueProc)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "opti: failed to create web server: %v\n", err)
 		os.Exit(1)
 	}
+	return webServer
+}
 
-	// Create context for graceful shutdown
+// runServicesUntilShutdown starts all services and waits for shutdown signal.
+func runServicesUntilShutdown(
+	cfg config.Config,
+	webServer *web.Server,
+	queueProc *queue.Processor,
+	_ *gorm.DB,
+) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Setup signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	// Wait group for all goroutines
 	var wg sync.WaitGroup
 
-	// Start web server
+	startWebServer(ctx, &wg, webServer)
+	startQueueProcessor(ctx, &wg, queueProc)
+	startScanner(ctx, &wg, cfg)
+
+	<-sigChan
+	if !cfg.Silent {
+		fmt.Fprintf(os.Stdout, "\nShutting down...\n")
+	}
+	cancel()
+
+	wg.Wait()
+	if !cfg.Silent {
+		fmt.Fprintf(os.Stdout, "Shutdown complete.\n")
+	}
+}
+
+// startWebServer starts the web server in a goroutine.
+func startWebServer(ctx context.Context, wg *sync.WaitGroup, webServer *web.Server) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -196,8 +266,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "opti: web server error: %v\n", startErr)
 		}
 	}()
+}
 
-	// Start queue processor
+// startQueueProcessor starts the queue processor in a goroutine.
+func startQueueProcessor(ctx context.Context, wg *sync.WaitGroup, queueProc *queue.Processor) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -206,8 +278,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "opti: queue processor error: %v\n", procErr)
 		}
 	}()
+}
 
-	// Start scanner
+// startScanner starts the scanner in a goroutine.
+func startScanner(ctx context.Context, wg *sync.WaitGroup, cfg config.Config) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -216,17 +290,4 @@ func main() {
 			fmt.Fprintf(os.Stderr, "opti: scanner error: %v\n", runErr)
 		}
 	}()
-
-	// Wait for shutdown signal
-	<-sigChan
-	if !cfg.Silent {
-		fmt.Fprintf(os.Stdout, "\nShutting down...\n")
-	}
-	cancel()
-
-	// Wait for all goroutines to finish
-	wg.Wait()
-	if !cfg.Silent {
-		fmt.Fprintf(os.Stdout, "Shutdown complete.\n")
-	}
 }

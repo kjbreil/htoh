@@ -38,6 +38,7 @@ type EventBroadcaster struct {
 // NewEventBroadcaster creates a new event broadcaster.
 func NewEventBroadcaster() *EventBroadcaster {
 	return &EventBroadcaster{
+		mu:      sync.RWMutex{},
 		clients: make(map[chan Event]bool),
 	}
 }

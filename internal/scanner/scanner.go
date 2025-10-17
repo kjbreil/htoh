@@ -17,6 +17,11 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	// Timeout for ffprobe operations.
+	probeTimeout = 60 * time.Second
+)
+
 type candidate struct {
 	path string
 	info *runner.ProbeInfo
@@ -54,7 +59,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 		return fmt.Errorf("init database: %w", err)
 	}
 	if !cfg.Silent {
-		fmt.Println("Database initialized.")
+		fmt.Fprintf(os.Stderr, "Database initialized.\n")
 	}
 
 	// Continuous scanning loop
@@ -62,9 +67,9 @@ func Run(ctx context.Context, cfg config.Config) error {
 		// Scan directories
 		if !cfg.Silent {
 			if len(cfg.SourceDirs) == 1 {
-				fmt.Println("Scanning directory...")
+				fmt.Fprintf(os.Stderr, "Scanning directory...\n")
 			} else {
-				fmt.Printf("Scanning %d directories...\n", len(cfg.SourceDirs))
+				fmt.Fprintf(os.Stderr, "Scanning %d directories...\n", len(cfg.SourceDirs))
 			}
 		}
 
@@ -76,26 +81,26 @@ func Run(ctx context.Context, cfg config.Config) error {
 		}
 
 		if !cfg.Silent {
-			fmt.Printf("Found %d video file(s). Database updated.\n", fileCount)
+			fmt.Fprintf(os.Stderr, "Found %d video file(s). Database updated.\n", fileCount)
 		}
 
 		// Check if we should scan continuously or exit
 		if cfg.ScanInterval == 0 {
 			if !cfg.Silent {
-				fmt.Println("Single scan complete. Exiting.")
+				fmt.Fprintf(os.Stderr, "Single scan complete. Exiting.\n")
 			}
 			break
 		}
 
 		// Wait for next scan
 		if !cfg.Silent {
-			fmt.Printf("Waiting %d minute(s) before next scan...\n", cfg.ScanInterval)
+			fmt.Fprintf(os.Stderr, "Waiting %d minute(s) before next scan...\n", cfg.ScanInterval)
 		}
 
 		select {
 		case <-ctx.Done():
 			if !cfg.Silent {
-				fmt.Println("\nShutdown requested. Exiting.")
+				fmt.Fprintf(os.Stderr, "\nShutdown requested. Exiting.\n")
 			}
 			return fmt.Errorf("context cancelled during scan interval: %w", ctx.Err())
 		case <-time.After(time.Duration(cfg.ScanInterval) * time.Minute):
@@ -109,18 +114,17 @@ func Run(ctx context.Context, cfg config.Config) error {
 func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, debug bool) ([]candidate, error) {
 	var out []candidate
 	if debug {
-		fmt.Printf("[scan] Walking %s\n", root)
+		fmt.Fprintf(os.Stderr, "[scan] Walking %s\n", root)
 	}
 
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	var err = filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
 		if d.IsDir() {
 			return nil
 		}
 
-		// Check file extension
 		ext := strings.ToLower(filepath.Ext(d.Name()))
 		switch ext {
 		case ".mkv", ".mp4", ".mov", ".m4v":
@@ -128,40 +132,38 @@ func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, 
 			return nil
 		}
 
-		// Get file info
-		fileInfo, err := os.Stat(p)
-		if err != nil {
+		fileInfo, statErr := os.Stat(p)
+		if statErr != nil {
 			if debug {
-				fmt.Printf("[scan] stat error for %s: %v\n", p, err)
+				fmt.Fprintf(os.Stderr, "[scan] stat error for %s: %v\n", p, statErr)
 			}
 			return nil
 		}
 
-		// Check database for existing file
-		existingFile, err := database.GetFileByPath(db, p)
+		existingFile, dbErr := database.GetFileByPath(db, p)
 		needsProbe := false
 
 		switch {
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			// New file
+		case errors.Is(dbErr, gorm.ErrRecordNotFound):
+
 			needsProbe = true
 			if debug {
-				fmt.Printf("[scan] new file: %s\n", p)
+				fmt.Fprintf(os.Stderr, "[scan] new file: %s\n", p)
 			}
-		case err != nil:
+		case dbErr != nil:
 			if debug {
-				fmt.Printf("[scan] db error for %s: %v\n", p, err)
+				fmt.Fprintf(os.Stderr, "[scan] db error for %s: %v\n", p, dbErr)
 			}
 			return nil
 		default:
-			// File exists in DB, check if changed
+
 			if existingFile.Size != fileInfo.Size() || !existingFile.ModTime.Equal(fileInfo.ModTime()) {
 				needsProbe = true
 				if debug {
-					fmt.Printf("[scan] file changed: %s\n", p)
+					fmt.Fprintf(os.Stderr, "[scan] file changed: %s\n", p)
 				}
 			} else if debug {
-				fmt.Printf("[scan] file unchanged (cached): %s\n", p)
+				fmt.Fprintf(os.Stderr, "[scan] file unchanged (cached): %s\n", p)
 			}
 		}
 
@@ -173,7 +175,6 @@ func listCandidates(ctx context.Context, ffprobePath, root string, db *gorm.DB, 
 			}
 		}
 
-		// Check if file is eligible for conversion and add to candidate list
 		if needsProbe && probeInfo != nil {
 			out = addCandidateFromProbe(db, existingFile, probeInfo, p, out, debug)
 		} else if !needsProbe && existingFile != nil {
@@ -199,17 +200,17 @@ func handleFileProbe(
 	db *gorm.DB,
 	debug bool,
 ) (*runner.ProbeInfoDetailed, *database.File) {
-	ctx2, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx2, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 
 	if debug {
-		fmt.Printf("[scan] probing %s\n", path)
+		fmt.Fprintf(os.Stderr, "[scan] probing %s\n", path)
 	}
 
 	probeInfo, err := runner.Probe(ctx2, ffprobePath, path)
 	if err != nil {
 		if debug {
-			fmt.Printf("[scan] ffprobe error for %s: %v\n", path, err)
+			fmt.Fprintf(os.Stderr, "[scan] ffprobe error for %s: %v\n", path, err)
 		}
 		storeFailedFile(db, path, fileInfo)
 		return nil, existingFile
@@ -231,7 +232,7 @@ func handleFileProbe(
 
 	if createErr := database.CreateOrUpdateFile(db, file); createErr != nil {
 		if debug {
-			fmt.Printf("[scan] db file update error for %s: %v\n", path, createErr)
+			fmt.Fprintf(os.Stderr, "[scan] db file update error for %s: %v\n", path, createErr)
 		}
 		return nil, existingFile
 	}
@@ -291,7 +292,7 @@ func storeMediaInfo(db *gorm.DB, fileID uint, probeInfo *runner.ProbeInfoDetaile
 	}
 
 	if mediaErr := database.CreateOrUpdateMediaInfo(db, mediaInfo); mediaErr != nil && debug {
-		fmt.Printf("[scan] db media info update error for %s: %v\n", path, mediaErr)
+		fmt.Fprintf(os.Stderr, "[scan] db media info update error for %s: %v\n", path, mediaErr)
 	}
 }
 
@@ -326,7 +327,7 @@ func addCandidateFromProbe(
 	}
 
 	if debug {
-		fmt.Printf("[scan] queued candidate %s (codec=%s)\n", path, probeInfo.VideoCodec)
+		fmt.Fprintf(os.Stderr, "[scan] queued candidate %s (codec=%s)\n", path, probeInfo.VideoCodec)
 	}
 
 	return append(out, candidate{path: path, info: oldProbeInfo})
@@ -373,9 +374,9 @@ func resetFileStatus(db *gorm.DB, file *database.File, path string, debug bool) 
 	file.Status = "discovered"
 	if updateErr := database.CreateOrUpdateFile(db, file); updateErr != nil {
 		if debug {
-			fmt.Printf("[scan] failed to reset status for %s: %v\n", path, updateErr)
+			fmt.Fprintf(os.Stderr, "[scan] failed to reset status for %s: %v\n", path, updateErr)
 		}
 	} else if debug {
-		fmt.Printf("[scan] reset status to discovered for %s (was: done/failed, now eligible)\n", path)
+		fmt.Fprintf(os.Stderr, "[scan] reset status to discovered for %s (was: done/failed, now eligible)\n", path)
 	}
 }

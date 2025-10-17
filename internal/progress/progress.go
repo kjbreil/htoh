@@ -9,6 +9,21 @@ import (
 	"time"
 )
 
+const (
+	// UI rendering constants.
+	renderIntervalMs = 300 // milliseconds between UI updates
+
+	// UI layout constants.
+	tableWidthWithDevice    = 105
+	tableWidthWithoutDevice = 90
+	maxFileNameWithDevice   = 28
+	maxFileNameDefault      = 38
+	fileNameTruncateSuffix  = 3 // characters for "..."
+
+	// Byte size conversion.
+	bytesPerKiB = 1024.0
+)
+
 type Prog struct {
 	mu   sync.RWMutex
 	rows map[int]*Row
@@ -89,7 +104,7 @@ func (p *Prog) GetProgress(wid int) *Row {
 }
 
 func (p *Prog) RenderLoop(stop <-chan struct{}) {
-	t := time.NewTicker(300 * time.Millisecond)
+	t := time.NewTicker(renderIntervalMs * time.Millisecond)
 	defer t.Stop()
 	for {
 		select {
@@ -130,32 +145,32 @@ func (p *Prog) renderOnce() {
 	fmt.Println("Workers live status (updates ~3/sec)")
 	if hasDevice {
 		//nolint:forbidigo // Live dashboard UI output to stdout
-		fmt.Println(strings.Repeat("─", 105))
+		fmt.Println(strings.Repeat("─", tableWidthWithDevice))
 		//nolint:forbidigo // Live dashboard UI output to stdout
 		fmt.Printf("%-6s  %-10s  %-28s  %7s  %6s  %8s  %8s  %-12s\n",
 			"WID", "PHASE", "FILE", "FPS", "SPEED", "TIME", "SIZE", "DEVICE")
 		//nolint:forbidigo // Live dashboard UI output to stdout
-		fmt.Println(strings.Repeat("─", 105))
+		fmt.Println(strings.Repeat("─", tableWidthWithDevice))
 	} else {
 		//nolint:forbidigo // Live dashboard UI output to stdout
-		fmt.Println(strings.Repeat("─", 90))
+		fmt.Println(strings.Repeat("─", tableWidthWithoutDevice))
 		//nolint:forbidigo // Live dashboard UI output to stdout
 		fmt.Printf("%-6s  %-10s  %-38s  %7s  %6s  %8s  %8s\n",
 			"WID", "PHASE", "FILE", "FPS", "SPEED", "TIME", "SIZE")
 		//nolint:forbidigo // Live dashboard UI output to stdout
-		fmt.Println(strings.Repeat("─", 90))
+		fmt.Println(strings.Repeat("─", tableWidthWithoutDevice))
 	}
 
 	// Rows
 	for _, id := range ids {
 		r := p.rows[id]
 		file := r.FileBase
-		maxFileLen := 38
+		maxFileLen := maxFileNameDefault
 		if hasDevice {
-			maxFileLen = 28
+			maxFileLen = maxFileNameWithDevice
 		}
 		if len(file) > maxFileLen {
-			file = file[:maxFileLen-3] + "..."
+			file = file[:maxFileLen-fileNameTruncateSuffix] + "..."
 		}
 		times := fmt.Sprintf("%6.1fs", r.OutTimeS)
 		size := humanBytes(r.SizeBytes)
@@ -176,25 +191,24 @@ func (p *Prog) renderOnce() {
 
 	if hasDevice {
 		//nolint:forbidigo // Live dashboard UI output to stdout
-		fmt.Println(strings.Repeat("─", 105))
+		fmt.Println(strings.Repeat("─", tableWidthWithDevice))
 	} else {
 		//nolint:forbidigo // Live dashboard UI output to stdout
-		fmt.Println(strings.Repeat("─", 90))
+		fmt.Println(strings.Repeat("─", tableWidthWithoutDevice))
 	}
 	//nolint:forbidigo // Live dashboard UI output to stdout
 	fmt.Println("Hints: -S to hide non-table logs | Ctrl+C stops after current tick")
 }
 
 func humanBytes(b int64) string {
-	const k = 1024.0
 	f := float64(b)
 	switch {
-	case f >= k*k*k:
-		return fmt.Sprintf("%.1fGiB", f/(k*k*k))
-	case f >= k*k:
-		return fmt.Sprintf("%.1fMiB", f/(k*k))
-	case f >= k:
-		return fmt.Sprintf("%.1fKiB", f/k)
+	case f >= bytesPerKiB*bytesPerKiB*bytesPerKiB:
+		return fmt.Sprintf("%.1fGiB", f/(bytesPerKiB*bytesPerKiB*bytesPerKiB))
+	case f >= bytesPerKiB*bytesPerKiB:
+		return fmt.Sprintf("%.1fMiB", f/(bytesPerKiB*bytesPerKiB))
+	case f >= bytesPerKiB:
+		return fmt.Sprintf("%.1fKiB", f/bytesPerKiB)
 	default:
 		return fmt.Sprintf("%dB", b)
 	}

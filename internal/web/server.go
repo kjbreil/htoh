@@ -20,17 +20,33 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	// HTTP server timeouts.
+	readHeaderTimeout = 10 * time.Second
+	shutdownTimeout   = 5 * time.Second
+
+	// Event channel buffer size.
+	eventChannelBuffer = 10
+
+	// Bitrate conversion factors.
+	bitsPerMegabit = 1000000 // 1 Mbps = 1,000,000 bps
+	bytesPerKiB    = 1024    // 1 KiB = 1,024 bytes
+
+	// Size conversion factors.
+	bytesPerGiB = 1024 * 1024 * 1024 // 1 GiB = 1,073,741,824 bytes
+)
+
 // Server represents the web server.
 type Server struct {
 	db          *gorm.DB
 	cfg         config.Config
 	broadcaster *EventBroadcaster
-	queueProc   *queue.QueueProcessor
+	queueProc   *queue.Processor
 	templates   *template.Template
 }
 
 // NewServer creates a new web server.
-func NewServer(db *gorm.DB, cfg config.Config, queueProc *queue.QueueProcessor) (*Server, error) {
+func NewServer(db *gorm.DB, cfg config.Config, queueProc *queue.Processor) (*Server, error) {
 	broadcaster := NewEventBroadcaster()
 
 	// Set broadcaster on queue processor for real-time log events
@@ -125,20 +141,20 @@ func (s *Server) Start(ctx context.Context, port int) error {
 	server := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
 	// Graceful shutdown
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			fmt.Fprintf(os.Stderr, "Server shutdown error: %v\n", err)
 		}
 	}()
 
-	fmt.Printf("Web server starting on http://%s\n", addr)
+	fmt.Fprintf(os.Stderr, "Web server starting on http://%s\n", addr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("server error: %w", err)
 	}
@@ -251,9 +267,18 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 	}
 
 	root := &TreeNode{
-		Name:  filepath.Base(rootPath),
-		Path:  rootPath,
-		IsDir: info.IsDir(),
+		Name:             filepath.Base(rootPath),
+		Path:             rootPath,
+		IsDir:            info.IsDir(),
+		FileID:           0,
+		Codec:            "",
+		Size:             0,
+		Status:           "",
+		CanConvert:       false,
+		QualityProfileID: 0,
+		ProfileIsMixed:   false,
+		Children:         nil,
+		Stats:            nil,
 	}
 
 	if !info.IsDir() {
@@ -318,9 +343,18 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 			}
 
 			childNode := &TreeNode{
-				Name:  entry.Name(),
-				Path:  childPath,
-				IsDir: false,
+				Name:             entry.Name(),
+				Path:             childPath,
+				IsDir:            false,
+				FileID:           0,
+				Codec:            "",
+				Size:             0,
+				Status:           "",
+				CanConvert:       false,
+				QualityProfileID: 0,
+				ProfileIsMixed:   false,
+				Children:         nil,
+				Stats:            nil,
 			}
 
 			if file, ok := fileMap[childPath]; ok {
@@ -373,7 +407,10 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 // calculateFolderStats calculates aggregate statistics for a folder.
 func (s *Server) calculateFolderStats(children *[]TreeNode) *FolderStats {
 	stats := &FolderStats{
+		TotalFiles: 0,
+		TotalSize:  0,
 		CodecCount: make(map[string]int),
+		H264Count:  0,
 	}
 
 	for _, child := range *children {
@@ -514,7 +551,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	// Create client channel
-	client := make(chan Event, 10)
+	client := make(chan Event, eventChannelBuffer)
 	s.broadcaster.Register(client)
 	defer s.broadcaster.Unregister(client)
 
@@ -557,13 +594,12 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 
 // formatSize formats a byte size as human-readable string.
 func formatSize(size int64) string {
-	const unit = 1024
-	if size < unit {
+	if size < bytesPerKiB {
 		return fmt.Sprintf("%d B", size)
 	}
-	div, exp := int64(unit), 0
-	for n := size / unit; n >= unit; n /= unit {
-		div *= unit
+	div, exp := int64(bytesPerKiB), 0
+	for n := size / bytesPerKiB; n >= bytesPerKiB; n /= bytesPerKiB {
+		div *= bytesPerKiB
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
@@ -851,6 +887,7 @@ func (s *Server) handleProfileCreateJSON(w http.ResponseWriter, r *http.Request)
 
 	// Create profile
 	profile := &database.QualityProfile{
+		ID:                0, // Will be auto-assigned by GORM
 		Name:              reqData.Name,
 		Description:       reqData.Description,
 		Mode:              reqData.Mode,
@@ -858,13 +895,26 @@ func (s *Server) handleProfileCreateJSON(w http.ResponseWriter, r *http.Request)
 		QualityLevel:      reqData.Quality,
 		BitrateMultiplier: reqData.BitrateMultiplier,
 		IsDefault:         false,
+		CreatedAt:         time.Time{}, // Will be auto-set by GORM
+		UpdatedAt:         time.Time{}, // Will be auto-set by GORM
 	}
 
 	// Handle is_default flag
 	if reqData.IsDefault {
 		// Unset other defaults first
 		var err error
-		if err = s.db.Model(&database.QualityProfile{}).
+		if err = s.db.Model(&database.QualityProfile{
+			ID:                0,
+			Name:              "",
+			Description:       "",
+			Mode:              "",
+			TargetBitrate:     0,
+			QualityLevel:      0,
+			BitrateMultiplier: 0,
+			IsDefault:         false,
+			CreatedAt:         time.Time{},
+			UpdatedAt:         time.Time{},
+		}).
 			Where("is_default = ?", true).
 			Update("is_default", false).Error; err != nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -1085,6 +1135,7 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Create profile
 	profile := &database.QualityProfile{
+		ID:                0, // Will be auto-assigned by GORM
 		Name:              name,
 		Description:       description,
 		Mode:              mode,
@@ -1092,6 +1143,8 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 		QualityLevel:      qualityLevel,
 		BitrateMultiplier: bitrateMultiplier,
 		IsDefault:         false,
+		CreatedAt:         time.Time{}, // Will be auto-set by GORM
+		UpdatedAt:         time.Time{}, // Will be auto-set by GORM
 	}
 
 	if err = database.CreateOrUpdateQualityProfile(s.db, profile); err != nil {
@@ -1274,7 +1327,18 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 	switch isDefaultStr {
 	case "true":
 		// Unset other defaults first
-		if err = s.db.Model(&database.QualityProfile{}).
+		if err = s.db.Model(&database.QualityProfile{
+			ID:                0,
+			Name:              "",
+			Description:       "",
+			Mode:              "",
+			TargetBitrate:     0,
+			QualityLevel:      0,
+			BitrateMultiplier: 0,
+			IsDefault:         false,
+			CreatedAt:         time.Time{},
+			UpdatedAt:         time.Time{},
+		}).
 			Where("is_default = ?", true).
 			Update("is_default", false).Error; err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -1548,7 +1612,18 @@ func (s *Server) handleProfileUpdateJSON(w http.ResponseWriter, r *http.Request,
 	// Handle is_default flag
 	if reqData.IsDefault {
 		// Unset other defaults first
-		if err = s.db.Model(&database.QualityProfile{}).
+		if err = s.db.Model(&database.QualityProfile{
+			ID:                0,
+			Name:              "",
+			Description:       "",
+			Mode:              "",
+			TargetBitrate:     0,
+			QualityLevel:      0,
+			BitrateMultiplier: 0,
+			IsDefault:         false,
+			CreatedAt:         time.Time{},
+			UpdatedAt:         time.Time{},
+		}).
 			Where("is_default = ?", true).
 			Update("is_default", false).Error; err != nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -1869,13 +1944,13 @@ func (s *Server) handleFilesFiltered(w http.ResponseWriter, r *http.Request) {
 	if minBitrateStr := query.Get("min_bitrate"); minBitrateStr != "" {
 		var minBitrateMbps float64
 		if _, scanErr := fmt.Sscanf(minBitrateStr, "%f", &minBitrateMbps); scanErr == nil {
-			filters.MinBitrate = int64(minBitrateMbps * 1000000)
+			filters.MinBitrate = int64(minBitrateMbps * bitsPerMegabit)
 		}
 	}
 	if maxBitrateStr := query.Get("max_bitrate"); maxBitrateStr != "" {
 		var maxBitrateMbps float64
 		if _, scanErr := fmt.Sscanf(maxBitrateStr, "%f", &maxBitrateMbps); scanErr == nil {
-			filters.MaxBitrate = int64(maxBitrateMbps * 1000000)
+			filters.MaxBitrate = int64(maxBitrateMbps * bitsPerMegabit)
 		}
 	}
 
@@ -1883,13 +1958,13 @@ func (s *Server) handleFilesFiltered(w http.ResponseWriter, r *http.Request) {
 	if minSizeStr := query.Get("min_size"); minSizeStr != "" {
 		var minSizeGB float64
 		if _, scanErr := fmt.Sscanf(minSizeStr, "%f", &minSizeGB); scanErr == nil {
-			filters.MinSize = int64(minSizeGB * 1024 * 1024 * 1024)
+			filters.MinSize = int64(minSizeGB * bytesPerGiB)
 		}
 	}
 	if maxSizeStr := query.Get("max_size"); maxSizeStr != "" {
 		var maxSizeGB float64
 		if _, scanErr := fmt.Sscanf(maxSizeStr, "%f", &maxSizeGB); scanErr == nil {
-			filters.MaxSize = int64(maxSizeGB * 1024 * 1024 * 1024)
+			filters.MaxSize = int64(maxSizeGB * bytesPerGiB)
 		}
 	}
 
@@ -1916,6 +1991,11 @@ func (s *Server) handleFilesFiltered(w http.ResponseWriter, r *http.Request) {
 			Size:             files[i].Size,
 			Status:           files[i].Status,
 			QualityProfileID: files[i].QualityProfileID,
+			Codec:            "",
+			Bitrate:          0,
+			Width:            0,
+			Height:           0,
+			Duration:         0,
 		}
 
 		// Get media info for this file

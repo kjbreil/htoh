@@ -12,6 +12,11 @@ import (
 	"strings"
 )
 
+const (
+	// FPS parsing constants.
+	fpsPartsExpected = 2 // expected number of parts in fps fraction (numerator/denominator)
+)
+
 type ffProbeOutput struct {
 	Streams []ffProbeStream `json:"streams"`
 	Format  struct {
@@ -79,7 +84,7 @@ type ProbeInfoDetailed struct {
 // fpsFromFrac parses "24000/1001" → 23.976, "25/1" → 25, "0/0" → 0.
 func fpsFromFrac(fr string) float64 {
 	parts := strings.Split(fr, "/")
-	if len(parts) != 2 {
+	if len(parts) != fpsPartsExpected {
 		return 0
 	}
 	n, _ := strconv.ParseFloat(parts[0], 64)

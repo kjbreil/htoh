@@ -19,6 +19,49 @@ import (
 
 const (
 	ContainerMP4 = "mp4"
+
+	// Quality level thresholds for VBR encoding (CRF values).
+	qualityLevelDefault       = 22
+	qualityLevelExcellent     = 25
+	qualityLevelVeryGood      = 26
+	qualityLevelGood          = 27
+	qualityLevelFair          = 28
+	qualityLevelAcceptable    = 29
+	qualityLevelModerate      = 30
+	qualityLevelLow           = 31
+	qualityLevelVeryLow       = 32
+	crfMinimum                = 16
+	crfMaximum                = 35
+	icqMinimum                = 1
+	icqMaximum                = 51
+	icqOffset                 = 1
+	cqMinimum                 = 0
+	cqMaximum                 = 51
+	cqOffset                  = 1
+	videoToolboxQualityFactor = 2
+	videoToolboxQualityMax    = 100
+
+	// Bits per pixel thresholds for quality estimation.
+	bppExcellent  = 0.18
+	bppVeryGood   = 0.14
+	bppGood       = 0.11
+	bppFair       = 0.09
+	bppAcceptable = 0.075
+	bppModerate   = 0.06
+	bppLow        = 0.045
+
+	// Bitrate thresholds (bits per second) for quality estimation fallback.
+	bitrateExcellent = 20_000_000
+	bitrateVeryGood  = 12_000_000
+	bitrateGood      = 8_000_000
+	bitrateFair      = 5_000_000
+	bitrateModerate  = 3_000_000
+
+	// Progress parsing constants.
+	microsecondsPerSecond = 1000000.0
+
+	// File and directory permissions.
+	workDirPerms = 0o750
 )
 
 type QualityChoice struct {
@@ -119,9 +162,9 @@ func DeriveQualityFromProfile(profile *database.QualityProfile, info *ProbeInfo)
 		// CRF (16-35): for cpu/vaapi - lower is better quality
 		// ICQ (1-51): for qsv - lower is better quality
 		// CQ (0-51): for nvenc - lower is better quality
-		crf := clampRange(qualityLevel, 16, 35)
-		icq := clampRange(qualityLevel-1, 1, 51)
-		cq := clampRange(qualityLevel-1, 0, 51)
+		crf := clampRange(qualityLevel, crfMinimum, crfMaximum)
+		icq := clampRange(qualityLevel-icqOffset, icqMinimum, icqMaximum)
+		cq := clampRange(qualityLevel-cqOffset, cqMinimum, cqMaximum)
 
 		return QualityChoice{
 			Mode:          "vbr",
@@ -143,7 +186,7 @@ func DeriveQualityFromProfile(profile *database.QualityProfile, info *ProbeInfo)
 // This function is kept for backward compatibility and creates a VBR quality choice.
 // For profile-based quality selection, use DeriveQualityFromProfile instead.
 func DeriveQualityChoice(info *ProbeInfo, fast bool) QualityChoice {
-	base := 22
+	base := qualityLevelDefault
 	var bpp float64
 	var bitrate int64
 	if info != nil {
@@ -153,9 +196,9 @@ func DeriveQualityChoice(info *ProbeInfo, fast bool) QualityChoice {
 	if fast {
 		base++
 	}
-	crf := clampRange(base, 16, 35)
-	icq := clampRange(base-1, 1, 51)
-	cq := clampRange(base-1, 0, 51)
+	crf := clampRange(base, crfMinimum, crfMaximum)
+	icq := clampRange(base-icqOffset, icqMinimum, icqMaximum)
+	cq := clampRange(base-cqOffset, cqMinimum, cqMaximum)
 	return QualityChoice{
 		Mode:          "vbr",   // Default to VBR mode for backward compatibility
 		TargetBitrate: 0,       // Not used in VBR mode
@@ -169,7 +212,7 @@ func DeriveQualityChoice(info *ProbeInfo, fast bool) QualityChoice {
 
 func estimateQualityLevel(info *ProbeInfo) (int, float64) {
 	if info == nil {
-		return 22, 0
+		return qualityLevelDefault, 0
 	}
 	w, h := info.Width, info.Height
 	fps := info.FPS
@@ -182,40 +225,40 @@ func estimateQualityLevel(info *ProbeInfo) (int, float64) {
 		}
 	}
 	switch {
-	case bpp >= 0.18:
-		return 25, bpp
-	case bpp >= 0.14:
-		return 26, bpp
-	case bpp >= 0.11:
-		return 27, bpp
-	case bpp >= 0.09:
-		return 28, bpp
-	case bpp >= 0.075:
-		return 29, bpp
-	case bpp >= 0.06:
-		return 30, bpp
-	case bpp >= 0.045:
-		return 31, bpp
+	case bpp >= bppExcellent:
+		return qualityLevelExcellent, bpp
+	case bpp >= bppVeryGood:
+		return qualityLevelVeryGood, bpp
+	case bpp >= bppGood:
+		return qualityLevelGood, bpp
+	case bpp >= bppFair:
+		return qualityLevelFair, bpp
+	case bpp >= bppAcceptable:
+		return qualityLevelAcceptable, bpp
+	case bpp >= bppModerate:
+		return qualityLevelModerate, bpp
+	case bpp >= bppLow:
+		return qualityLevelLow, bpp
 	case bpp > 0:
-		return 32, bpp
+		return qualityLevelVeryLow, bpp
 	}
 	if bitrate > 0 {
 		switch {
-		case bitrate >= 20_000_000:
-			return 26, 0
-		case bitrate >= 12_000_000:
-			return 27, 0
-		case bitrate >= 8_000_000:
-			return 28, 0
-		case bitrate >= 5_000_000:
-			return 29, 0
-		case bitrate >= 3_000_000:
-			return 30, 0
+		case bitrate >= bitrateExcellent:
+			return qualityLevelVeryGood, 0
+		case bitrate >= bitrateVeryGood:
+			return qualityLevelGood, 0
+		case bitrate >= bitrateGood:
+			return qualityLevelFair, 0
+		case bitrate >= bitrateFair:
+			return qualityLevelAcceptable, 0
+		case bitrate >= bitrateModerate:
+			return qualityLevelModerate, 0
 		default:
-			return 32, 0
+			return qualityLevelVeryLow, 0
 		}
 	}
-	return 30, 0
+	return qualityLevelModerate, 0
 }
 
 func clampRange(val, minVal, maxVal int) int {
@@ -384,19 +427,20 @@ func buildVideoToolboxArgs(job Job) []string {
 	}
 
 	// Add quality arguments based on mode
-	if job.Quality.Mode == "cbr" && job.Quality.TargetBitrate > 0 {
+	switch {
+	case job.Quality.Mode == "cbr" && job.Quality.TargetBitrate > 0:
 		// CBR mode: use target bitrate
 		args = append(args, "-b:v", strconv.FormatInt(job.Quality.TargetBitrate, 10))
-	} else if job.Quality.TargetBitrate > 0 {
+	case job.Quality.TargetBitrate > 0:
 		// VBR mode with bitrate hint: use target bitrate (VideoToolbox handles as bitrate target, not strict CBR)
 		// This maintains the existing behavior of using 50% of source bitrate
 		args = append(args, "-b:v", strconv.FormatInt(job.Quality.TargetBitrate, 10))
-	} else {
+	default:
 		// VBR mode with quality value: use -q:v
 		// VideoToolbox -q:v range is 0-100 (0 = best quality, 100 = worst)
-		qv := job.Quality.CRF * 2
-		if qv > 100 {
-			qv = 100
+		qv := job.Quality.CRF * videoToolboxQualityFactor
+		if qv > videoToolboxQualityMax {
+			qv = videoToolboxQualityMax
 		}
 		args = append(args, "-q:v", strconv.Itoa(qv))
 	}
@@ -414,7 +458,7 @@ func Transcode(
 	prog *progress.Prog,
 	logFunc func(string),
 ) error {
-	if err := os.MkdirAll(cfg.WorkDir, 0o750); err != nil {
+	if err := os.MkdirAll(cfg.WorkDir, workDirPerms); err != nil {
 		return fmt.Errorf("failed to create work directory %s: %w", cfg.WorkDir, err)
 	}
 
@@ -506,7 +550,7 @@ func Transcode(
 				switch key {
 				case "out_time_ms":
 					ms, _ := strconv.ParseFloat(val, 64)
-					prog.Update(workerID, func(r *progress.Row) { r.OutTimeS = ms / 1000000.0 })
+					prog.Update(workerID, func(r *progress.Row) { r.OutTimeS = ms / microsecondsPerSecond })
 				case "fps":
 					fps, _ := strconv.ParseFloat(val, 64)
 					prog.Update(workerID, func(r *progress.Row) { r.FPS = fps })

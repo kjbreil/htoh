@@ -9,6 +9,14 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+const (
+	// File permissions for generated config files.
+	configFilePerms = 0600
+
+	// Default scan interval value used for comparison.
+	defaultScanIntervalMinutes = 5
+)
+
 // Config represents the runtime configuration for the opti application.
 type Config struct {
 	SourceDirs   []string
@@ -132,11 +140,7 @@ func LoadFromFile(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// GenerateDefault creates an example configuration file with all available options.
-// The file includes helpful comments explaining each setting and shows sensible defaults.
-// Returns an error if the file cannot be written.
-func GenerateDefault(path string) error {
-	content := `# Opti Configuration File
+const defaultConfigContent = `# Opti Configuration File
 #
 # This is an example configuration file for the Opti H.264 to HEVC transcoder.
 # All settings shown here are optional - CLI flags will override config file values.
@@ -279,11 +283,13 @@ func GenerateDefault(path string) error {
 # workers = 2
 `
 
-	// Write the file
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+// GenerateDefault creates an example configuration file with all available options.
+// The file includes helpful comments explaining each setting and shows sensible defaults.
+// Returns an error if the file cannot be written.
+func GenerateDefault(path string) error {
+	if err := os.WriteFile(path, []byte(defaultConfigContent), configFilePerms); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
-
 	return nil
 }
 
@@ -317,7 +323,7 @@ func MergeConfigs(configFile, cliFlags *Config) *Config {
 		merged.Workers = cliFlags.Workers
 	}
 	// For ScanInterval, override if different from default (5)
-	if cliFlags.ScanInterval != 5 {
+	if cliFlags.ScanInterval != defaultScanIntervalMinutes {
 		merged.ScanInterval = cliFlags.ScanInterval
 	}
 	// For Engine, override if different from default ("cpu")

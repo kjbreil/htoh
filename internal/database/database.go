@@ -12,11 +12,17 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// Codec constants.
 const (
+	// CodecH264 is the H.264/AVC video codec identifier.
 	CodecH264 = "h264"
 	CodecAVC  = "avc"
 	CodecHEVC = "hevc"
+
+	// File and directory permissions.
+	workDirPerms = 0o750
+
+	// Default profile settings.
+	defaultBitrateMultiplier = 0.5 // 50% of source bitrate
 )
 
 // File represents a video file on disk with its metadata.
@@ -110,7 +116,7 @@ type TaskLog struct {
 // InitDB initializes the SQLite database with GORM.
 func InitDB(workDir string, debug bool) (*gorm.DB, error) {
 	// Create workDir if it doesn't exist
-	if err := os.MkdirAll(workDir, 0o750); err != nil {
+	if err := os.MkdirAll(workDir, workDirPerms); err != nil {
 		return nil, fmt.Errorf("failed to create work directory: %w", err)
 	}
 
@@ -155,7 +161,7 @@ func InitDB(workDir string, debug bool) (*gorm.DB, error) {
 	}
 
 	// Run migrations - use empty structs for GORM type inference
-	if err := db.AutoMigrate(
+	if err = db.AutoMigrate(
 		&File{
 			ID:               0,
 			Path:             "",
@@ -168,7 +174,31 @@ func InitDB(workDir string, debug bool) (*gorm.DB, error) {
 			CreatedAt:        time.Time{},
 			UpdatedAt:        time.Time{},
 		},
-		&MediaInfo{},
+		&MediaInfo{
+			ID:             0,
+			FileID:         0,
+			File:           nil,
+			Duration:       0,
+			FormatBitrate:  0,
+			Container:      "",
+			VideoCodec:     "",
+			VideoProfile:   "",
+			Width:          0,
+			Height:         0,
+			CodedWidth:     0,
+			CodedHeight:    0,
+			FPS:            0,
+			AspectRatio:    "",
+			VideoBitrate:   0,
+			PixelFormat:    "",
+			BitDepth:       0,
+			ChromaLocation: "",
+			ColorSpace:     "",
+			ColorRange:     "",
+			ColorPrimaries: "",
+			CreatedAt:      time.Time{},
+			UpdatedAt:      time.Time{},
+		},
 		&QualityProfile{
 			ID:                0,
 			Name:              "",
@@ -193,7 +223,16 @@ func InitDB(workDir string, debug bool) (*gorm.DB, error) {
 			CreatedAt:        time.Time{},
 			UpdatedAt:        time.Time{},
 		},
-		&TaskLog{},
+		&TaskLog{
+			ID:          0,
+			QueueItemID: 0,
+			QueueItem:   nil,
+			FileID:      0,
+			File:        nil,
+			LogLevel:    "",
+			Message:     "",
+			CreatedAt:   time.Time{},
+		},
 	); err != nil {
 		return nil, fmt.Errorf("failed to migrate database: %w", err)
 	}
@@ -201,7 +240,7 @@ func InitDB(workDir string, debug bool) (*gorm.DB, error) {
 	// Create default profile if no profiles exist
 	var count int64
 	// Use empty struct for GORM Model() type inference
-	if err := db.Model(&QualityProfile{
+	if err = db.Model(&QualityProfile{
 		ID:                0,
 		Name:              "",
 		Description:       "",
@@ -217,7 +256,7 @@ func InitDB(workDir string, debug bool) (*gorm.DB, error) {
 	}
 
 	if count == 0 {
-		if err := CreateDefaultProfile(db); err != nil {
+		if err = CreateDefaultProfile(db); err != nil {
 			return nil, fmt.Errorf("failed to create default profile: %w", err)
 		}
 	}
@@ -514,7 +553,7 @@ func CreateDefaultProfile(db *gorm.DB) error {
 		Mode:              "cbr_percent",
 		TargetBitrate:     0,
 		QualityLevel:      0,
-		BitrateMultiplier: 0.5,
+		BitrateMultiplier: defaultBitrateMultiplier,
 		IsDefault:         true,
 		CreatedAt:         time.Time{}, // Will be auto-set by GORM
 		UpdatedAt:         time.Time{}, // Will be auto-set by GORM
