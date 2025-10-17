@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -45,6 +46,7 @@ type LogBroadcaster interface {
 type Processor struct {
 	db              *gorm.DB
 	cfg             config.Config
+	log             *slog.Logger
 	mu              sync.RWMutex
 	active          map[uint]bool // track active queue items
 	broadcaster     LogBroadcaster
@@ -52,10 +54,11 @@ type Processor struct {
 }
 
 // NewQueueProcessor creates a new queue processor.
-func NewQueueProcessor(db *gorm.DB, cfg config.Config) *Processor {
+func NewQueueProcessor(db *gorm.DB, cfg config.Config, log *slog.Logger) *Processor {
 	return &Processor{
 		db:              db,
 		cfg:             cfg,
+		log:             log,
 		mu:              sync.RWMutex{},
 		active:          make(map[uint]bool),
 		broadcaster:     nil, // Set via SetBroadcaster
@@ -84,7 +87,10 @@ func (qp *Processor) broadcastHTML(queueItemID uint) {
 func (qp *Processor) logAndBroadcast(queueItemID, fileID uint, logLevel, message string) {
 	// Create log in database
 	if err := database.CreateTaskLog(qp.db, queueItemID, fileID, logLevel, message); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create task log: %v\n", err)
+		qp.log.Error("Failed to create task log",
+			slog.Uint64("queue_item_id", uint64(queueItemID)),
+			slog.Uint64("file_id", uint64(fileID)),
+			slog.Any("error", err))
 	}
 
 	// Broadcast via SSE if broadcaster is set
@@ -211,7 +217,7 @@ func (qp *Processor) feedQueue(jobs chan<- *database.QueueItem) {
 	}
 	if err != nil {
 		if !qp.cfg.Silent {
-			fmt.Fprintf(os.Stderr, "Error getting next queue item: %v\n", err)
+			qp.log.Error("Error getting next queue item", slog.Any("error", err))
 		}
 		return
 	}
@@ -286,14 +292,20 @@ func (qp *Processor) processItem(ctx context.Context, workerID int, item *databa
 // initializeProcessing sets up the queue item for processing.
 func (qp *Processor) initializeProcessing(workerID int, item *database.QueueItem) bool {
 	if err := database.UpdateQueueItemStatus(qp.db, item.ID, "processing", ""); err != nil {
-		fmt.Fprintf(os.Stderr, "[worker %d] Failed to update queue item status: %v\n", workerID, err)
+		qp.log.Error("Failed to update queue item status",
+			slog.Int("worker_id", workerID),
+			slog.Uint64("queue_item_id", uint64(item.ID)),
+			slog.Any("error", err))
 		return false
 	}
 	qp.broadcastHTML(item.ID)
 	qp.logAndBroadcast(item.ID, item.FileID, "info", fmt.Sprintf("Task started on worker %d", workerID))
 
 	if !qp.cfg.Silent {
-		fmt.Fprintf(os.Stdout, "[worker %d] Processing: %s\n", workerID, item.File.Name)
+		qp.log.Info("Processing file",
+			slog.Int("worker_id", workerID),
+			slog.Uint64("queue_item_id", uint64(item.ID)),
+			slog.String("file", item.File.Name))
 	}
 	return true
 }
@@ -437,7 +449,7 @@ func (qp *Processor) executeTranscode(
 	var transcodeErr error
 	if transcodeErr = runner.Transcode(ctx, qp.cfg, job, workerID, prog, func(msg string) {
 		qp.logAndBroadcast(item.ID, item.FileID, "info", msg)
-	}); transcodeErr != nil {
+	}, qp.log); transcodeErr != nil {
 		errMsg := fmt.Sprintf("transcoding failed: %v", transcodeErr)
 		qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
 		qp.handleProcessingError(workerID, item, errMsg)
@@ -456,7 +468,10 @@ func (qp *Processor) executeTranscode(
 			CreatedAt:        time.Time{},
 			UpdatedAt:        time.Time{},
 		}).Where("id = ?", item.FileID).Update("status", "failed").Error; fileErr != nil {
-			fmt.Fprintf(os.Stderr, "[worker %d] Failed to update file status: %v\n", workerID, fileErr)
+			qp.log.Error("Failed to update file status",
+				slog.Int("worker_id", workerID),
+				slog.Uint64("file_id", uint64(item.FileID)),
+				slog.Any("error", fileErr))
 		}
 		return false
 	}
@@ -479,7 +494,10 @@ func (qp *Processor) postProcessTranscode(ctx context.Context, workerID int, ite
 	// Mark as done
 	var doneErr error
 	if doneErr = database.UpdateQueueItemStatus(qp.db, item.ID, "done", ""); doneErr != nil {
-		fmt.Fprintf(os.Stderr, "[worker %d] Failed to mark queue item as done: %v\n", workerID, doneErr)
+		qp.log.Error("Failed to mark queue item as done",
+			slog.Int("worker_id", workerID),
+			slog.Uint64("queue_item_id", uint64(item.ID)),
+			slog.Any("error", doneErr))
 		return
 	}
 	qp.broadcastHTML(item.ID)
@@ -503,13 +521,19 @@ func (qp *Processor) postProcessTranscode(ctx context.Context, workerID int, ite
 		CreatedAt:        time.Time{},
 		UpdatedAt:        time.Time{},
 	}).Where("id = ?", item.FileID).Update("status", "done").Error; statusErr != nil {
-		fmt.Fprintf(os.Stderr, "[worker %d] Failed to update file status: %v\n", workerID, statusErr)
+		qp.log.Error("Failed to update file status",
+			slog.Int("worker_id", workerID),
+			slog.Uint64("file_id", uint64(item.FileID)),
+			slog.Any("error", statusErr))
 	}
 
 	qp.logAndBroadcast(item.ID, item.FileID, "info", "Task completed successfully")
 
 	if !qp.cfg.Silent {
-		fmt.Fprintf(os.Stdout, "[worker %d] Completed: %s\n", workerID, item.File.Name)
+		qp.log.Info("Task completed",
+			slog.Int("worker_id", workerID),
+			slog.Uint64("queue_item_id", uint64(item.ID)),
+			slog.String("file", item.File.Name))
 	}
 }
 
@@ -601,7 +625,10 @@ func (qp *Processor) handleProcessingError(workerID int, item *database.QueueIte
 	qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
 	var updateErr error
 	if updateErr = database.UpdateQueueItemStatus(qp.db, item.ID, "failed", errMsg); updateErr != nil {
-		fmt.Fprintf(os.Stderr, "[worker %d] Failed to update queue item status: %v\n", workerID, updateErr)
+		qp.log.Error("Failed to update queue item status",
+			slog.Int("worker_id", workerID),
+			slog.Uint64("queue_item_id", uint64(item.ID)),
+			slog.Any("error", updateErr))
 	}
 	qp.broadcastHTML(item.ID)
 }

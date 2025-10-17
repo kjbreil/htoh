@@ -34,6 +34,7 @@ type Config struct {
 	ForceMP4     bool
 	FaststartMP4 bool
 	FastMode     bool
+	LogLevel     string // Logging level: debug, info, warn, error
 }
 
 // NormalizeConfig sets default values for config fields that may be empty.
@@ -93,6 +94,7 @@ type TomlConfig struct {
 	ForceMP4     bool     `toml:"force_mp4"`
 	FaststartMP4 bool     `toml:"faststart_mp4"`
 	FastMode     bool     `toml:"fast_mode"`
+	LogLevel     string   `toml:"log_level"`
 }
 
 // LoadFromFile reads and parses a TOML configuration file.
@@ -135,6 +137,7 @@ func LoadFromFile(path string) (*Config, error) {
 		ForceMP4:     tomlCfg.ForceMP4,
 		FaststartMP4: tomlCfg.FaststartMP4,
 		FastMode:     tomlCfg.FastMode,
+		LogLevel:     tomlCfg.LogLevel,
 	}
 
 	return cfg, nil
@@ -226,6 +229,11 @@ const defaultConfigContent = `# Opti Configuration File
 # Increases CRF/ICQ/CQ values by 1 for faster encoding
 # Default: false
 # fast_mode = false
+
+# log_level: Logging level for application output
+# Options: "debug", "info", "warn", "error"
+# Default: "info"
+# log_level = "info"
 
 # ============================================================================
 # OUTPUT OPTIONS
@@ -351,6 +359,9 @@ func MergeConfigs(configFile, cliFlags *Config) *Config {
 	}
 	if cliFlags.FastMode {
 		merged.FastMode = true
+	}
+	if cliFlags.LogLevel != "" {
+		merged.LogLevel = cliFlags.LogLevel
 	}
 
 	return &merged

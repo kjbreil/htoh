@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/kjbreil/opti/internal/config"
 	"github.com/kjbreil/opti/internal/database"
+	"github.com/kjbreil/opti/internal/logger"
 	"github.com/kjbreil/opti/internal/queue"
 	"github.com/kjbreil/opti/internal/runner"
 	"github.com/kjbreil/opti/internal/scanner"
@@ -61,6 +63,7 @@ var (
 		false,
 		"Favor smaller files by lowering quality targets one notch across all engines",
 	)
+	logLevel       = flag.String("log-level", "", "Logging level: debug, info, warn, error")
 	listHW         = flag.Bool("list-hw", false, "Detect and print available hardware accelerators/encoders, then exit")
 	version        = flag.Bool("version", false, "Print version and exit")
 	configPath     = flag.String("c", "", "Path to TOML config file (config values override CLI flags)")
@@ -91,11 +94,14 @@ func main() {
 	cfg := loadAndMergeConfig()
 	validateAndNormalizeConfig(&cfg)
 
-	db := initializeDatabase(cfg)
-	queueProc := queue.NewQueueProcessor(db, cfg)
-	webServer := createWebServer(db, cfg, queueProc)
+	// Initialize logger
+	log := initializeLogger(cfg)
 
-	runServicesUntilShutdown(cfg, webServer, queueProc, db)
+	db := initializeDatabase(cfg, log)
+	queueProc := queue.NewQueueProcessor(db, cfg, log)
+	webServer := createWebServer(db, cfg, queueProc, log)
+
+	runServicesUntilShutdown(cfg, webServer, queueProc, db, log)
 }
 
 // handleEarlyExitFlags handles flags that cause early exit (version, generate-config, list-hw).
@@ -178,6 +184,7 @@ func buildCLIConfig() config.Config {
 		ForceMP4:     *forceMP4,
 		FaststartMP4: *faststartMP4,
 		FastMode:     *fastMode,
+		LogLevel:     *logLevel,
 	}
 }
 
@@ -200,26 +207,48 @@ func validateAndNormalizeConfig(cfg *config.Config) {
 	config.NormalizeConfig(cfg)
 }
 
+// initializeLogger creates and configures the logger based on config settings.
+func initializeLogger(cfg config.Config) *slog.Logger {
+	// Determine log level
+	var level slog.Level
+	if cfg.Silent {
+		// Use a level higher than Error to effectively disable logging
+		level = logger.LevelDisabled
+	} else if cfg.LogLevel != "" {
+		var err error
+		level, err = logger.ParseLevel(cfg.LogLevel)
+		if err != nil {
+			// Log the error to stderr and use default level
+			fmt.Fprintf(os.Stderr, "opti: invalid log level %q: %v, using default\n", cfg.LogLevel, err)
+			level = logger.DefaultLevel
+		}
+	} else {
+		level = logger.DefaultLevel
+	}
+
+	return logger.NewLogger(level, os.Stdout)
+}
+
 // initializeDatabase initializes the database and returns the connection.
-func initializeDatabase(cfg config.Config) *gorm.DB {
-	db, err := database.InitDB(cfg.WorkDir, cfg.Debug)
+func initializeDatabase(cfg config.Config, log *slog.Logger) *gorm.DB {
+	var err error
+	db, err := database.InitDB(cfg.WorkDir, cfg.Debug, log)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "opti: failed to initialize database: %v\n", err)
+		log.Error("Failed to initialize database", slog.Any("error", err))
 		os.Exit(1)
 	}
 
-	if !cfg.Silent {
-		fmt.Fprintf(os.Stdout, "Database initialized.\n")
-	}
+	log.Info("Database initialized")
 
 	return db
 }
 
 // createWebServer creates and initializes the web server.
-func createWebServer(db *gorm.DB, cfg config.Config, queueProc *queue.Processor) *web.Server {
-	webServer, err := web.NewServer(db, cfg, queueProc)
+func createWebServer(db *gorm.DB, cfg config.Config, queueProc *queue.Processor, log *slog.Logger) *web.Server {
+	var err error
+	webServer, err := web.NewServer(db, cfg, queueProc, log)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "opti: failed to create web server: %v\n", err)
+		log.Error("Failed to create web server", slog.Any("error", err))
 		os.Exit(1)
 	}
 	return webServer
@@ -231,6 +260,7 @@ func runServicesUntilShutdown(
 	webServer *web.Server,
 	queueProc *queue.Processor,
 	_ *gorm.DB,
+	log *slog.Logger,
 ) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -240,54 +270,50 @@ func runServicesUntilShutdown(
 
 	var wg sync.WaitGroup
 
-	startWebServer(ctx, &wg, webServer)
-	startQueueProcessor(ctx, &wg, queueProc)
-	startScanner(ctx, &wg, cfg)
+	startWebServer(ctx, &wg, webServer, log)
+	startQueueProcessor(ctx, &wg, queueProc, log)
+	startScanner(ctx, &wg, cfg, log)
 
 	<-sigChan
-	if !cfg.Silent {
-		fmt.Fprintf(os.Stdout, "\nShutting down...\n")
-	}
+	log.Info("Shutting down")
 	cancel()
 
 	wg.Wait()
-	if !cfg.Silent {
-		fmt.Fprintf(os.Stdout, "Shutdown complete.\n")
-	}
+	log.Info("Shutdown complete")
 }
 
 // startWebServer starts the web server in a goroutine.
-func startWebServer(ctx context.Context, wg *sync.WaitGroup, webServer *web.Server) {
+func startWebServer(ctx context.Context, wg *sync.WaitGroup, webServer *web.Server, log *slog.Logger) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		var startErr error
 		if startErr = webServer.Start(ctx, *port); startErr != nil {
-			fmt.Fprintf(os.Stderr, "opti: web server error: %v\n", startErr)
+			log.Error("Web server error", slog.Any("error", startErr))
 		}
 	}()
 }
 
 // startQueueProcessor starts the queue processor in a goroutine.
-func startQueueProcessor(ctx context.Context, wg *sync.WaitGroup, queueProc *queue.Processor) {
+func startQueueProcessor(ctx context.Context, wg *sync.WaitGroup, queueProc *queue.Processor, log *slog.Logger) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		var procErr error
 		if procErr = queueProc.Start(ctx); procErr != nil {
-			fmt.Fprintf(os.Stderr, "opti: queue processor error: %v\n", procErr)
+			log.Error("Queue processor error", slog.Any("error", procErr))
 		}
 	}()
 }
 
 // startScanner starts the scanner in a goroutine.
-func startScanner(ctx context.Context, wg *sync.WaitGroup, cfg config.Config) {
+func startScanner(ctx context.Context, wg *sync.WaitGroup, cfg config.Config, log *slog.Logger) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		var runErr error
-		if runErr = scanner.Run(ctx, cfg); runErr != nil && !errors.Is(runErr, context.Canceled) {
-			fmt.Fprintf(os.Stderr, "opti: scanner error: %v\n", runErr)
+		if runErr = scanner.Run(ctx, cfg, log); runErr != nil && !errors.Is(runErr, context.Canceled) {
+			log.Error("Scanner error", slog.Any("error", runErr))
 		}
 	}()
 }

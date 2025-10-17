@@ -3,6 +3,7 @@ package database
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -114,7 +115,7 @@ type TaskLog struct {
 }
 
 // InitDB initializes the SQLite database with GORM.
-func InitDB(workDir string, debug bool) (*gorm.DB, error) {
+func InitDB(workDir string, debug bool, _ *slog.Logger) (*gorm.DB, error) {
 	// Create workDir if it doesn't exist
 	if err := os.MkdirAll(workDir, workDirPerms); err != nil {
 		return nil, fmt.Errorf("failed to create work directory: %w", err)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -360,7 +361,13 @@ func buildNVENCArgs(job Job) []string {
 
 // buildVAAPIArgs builds ffmpeg arguments for VAAPI (Video Acceleration API) encoding.
 // Returns args, vaapiDriverName, and error. The vaapiDriverName should be set as LIBVA_DRIVER_NAME env var.
-func buildVAAPIArgs(cfg config.Config, job Job, workerID int, prog *progress.Prog) ([]string, string, error) {
+func buildVAAPIArgs(
+	cfg config.Config,
+	job Job,
+	workerID int,
+	prog *progress.Prog,
+	log *slog.Logger,
+) ([]string, string, error) {
 	// Validate and get device (uses default if not specified)
 	vaapiDevice, err := validateVAAPIDevice(cfg.VAAPIDevice)
 	if err != nil {
@@ -375,18 +382,28 @@ func buildVAAPIArgs(cfg config.Config, job Job, workerID int, prog *progress.Pro
 	var vaapiDriverName string
 	vendorID, vendorErr := detectGPUVendor(vaapiDevice)
 	if vendorErr != nil && cfg.Debug {
-		fmt.Fprintf(os.Stderr, "[worker %d] Warning: Could not detect GPU vendor: %v\n", workerID, vendorErr)
+		log.Warn("Could not detect GPU vendor",
+			slog.Int("worker_id", workerID),
+			slog.Any("error", vendorErr))
 	}
 
 	vaapiDriverName = getVAAPIDriverName(vendorID)
 	if cfg.Debug {
 		vendorName := getVendorName(vendorID)
 		if vaapiDriverName != "" {
-			fmt.Fprintf(os.Stderr, "[worker %d] VAAPI: Using %s GPU (%s) with driver %s on device %s\n",
-				workerID, vendorName, vendorID, vaapiDriverName, vaapiDevice)
+			log.Info("VAAPI configuration",
+				slog.Int("worker_id", workerID),
+				slog.String("gpu_vendor", vendorName),
+				slog.String("vendor_id", vendorID),
+				slog.String("driver", vaapiDriverName),
+				slog.String("device", vaapiDevice))
 		} else {
-			fmt.Fprintf(os.Stderr, "[worker %d] VAAPI: Using %s GPU (%s) with auto-detected driver on device %s\n",
-				workerID, vendorName, vendorID, vaapiDevice)
+			log.Info("VAAPI configuration",
+				slog.Int("worker_id", workerID),
+				slog.String("gpu_vendor", vendorName),
+				slog.String("vendor_id", vendorID),
+				slog.String("driver", "auto-detected"),
+				slog.String("device", vaapiDevice))
 		}
 	}
 
@@ -457,6 +474,7 @@ func Transcode(
 	workerID int,
 	prog *progress.Prog,
 	logFunc func(string),
+	log *slog.Logger,
 ) error {
 	if err := os.MkdirAll(cfg.WorkDir, workDirPerms); err != nil {
 		return fmt.Errorf("failed to create work directory %s: %w", cfg.WorkDir, err)
@@ -473,7 +491,7 @@ func Transcode(
 	case "nvenc", "hevc_nvenc":
 		args = buildNVENCArgs(jb)
 	case "vaapi", "hevc_vaapi":
-		args, vaapiDriverName, buildErr = buildVAAPIArgs(cfg, jb, workerID, prog)
+		args, vaapiDriverName, buildErr = buildVAAPIArgs(cfg, jb, workerID, prog, log)
 		if buildErr != nil {
 			return buildErr
 		}
@@ -502,8 +520,10 @@ func Transcode(
 		}
 	}
 
-	// Always log the ffmpeg command to stderr
-	fmt.Fprintf(os.Stderr, "[worker %d] ffmpeg command: %s\n", workerID, cmdLine)
+	// Always log the ffmpeg command
+	log.Info("FFmpeg command",
+		slog.Int("worker_id", workerID),
+		slog.String("command", cmdLine))
 
 	// Also log via callback if provided (for queue logs)
 	if logFunc != nil {

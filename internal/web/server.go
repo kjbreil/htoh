@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -43,10 +44,11 @@ type Server struct {
 	broadcaster *EventBroadcaster
 	queueProc   *queue.Processor
 	templates   *template.Template
+	log         *slog.Logger
 }
 
 // NewServer creates a new web server.
-func NewServer(db *gorm.DB, cfg config.Config, queueProc *queue.Processor) (*Server, error) {
+func NewServer(db *gorm.DB, cfg config.Config, queueProc *queue.Processor, log *slog.Logger) (*Server, error) {
 	broadcaster := NewEventBroadcaster()
 
 	// Set broadcaster on queue processor for real-time log events
@@ -79,6 +81,7 @@ func NewServer(db *gorm.DB, cfg config.Config, queueProc *queue.Processor) (*Ser
 		broadcaster: broadcaster,
 		queueProc:   queueProc,
 		templates:   tmpl,
+		log:         log,
 	}
 
 	// Set HTML broadcaster for queue item status updates
@@ -86,7 +89,9 @@ func NewServer(db *gorm.DB, cfg config.Config, queueProc *queue.Processor) (*Ser
 		var item database.QueueItem
 		var loadErr error
 		if loadErr = db.Preload("File").First(&item, queueItemID).Error; loadErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to load queue item for HTML render: %v\n", loadErr)
+			log.Error("Failed to load queue item for HTML render",
+				slog.Uint64("queue_item_id", uint64(queueItemID)),
+				slog.Any("error", loadErr))
 			return
 		}
 
@@ -94,7 +99,9 @@ func NewServer(db *gorm.DB, cfg config.Config, queueProc *queue.Processor) (*Ser
 		var renderErr error
 		html, renderErr = s.renderQueueItemHTML(&item)
 		if renderErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to render queue item HTML: %v\n", renderErr)
+			log.Error("Failed to render queue item HTML",
+				slog.Uint64("queue_item_id", uint64(queueItemID)),
+				slog.Any("error", renderErr))
 			return
 		}
 
@@ -150,11 +157,11 @@ func (s *Server) Start(ctx context.Context, port int) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
-			fmt.Fprintf(os.Stderr, "Server shutdown error: %v\n", err)
+			s.log.Error("Server shutdown error", slog.Any("error", err))
 		}
 	}()
 
-	fmt.Fprintf(os.Stderr, "Web server starting on http://%s\n", addr)
+	s.log.Info("Web server starting", slog.String("address", addr))
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("server error: %w", err)
 	}
@@ -228,7 +235,9 @@ func (s *Server) handleSingleTreePath(w http.ResponseWriter, path string) {
 	w.Header().Set("Content-Type", "application/json")
 	var encodeErr error
 	if encodeErr = json.NewEncoder(w).Encode(tree); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response",
+			slog.String("endpoint", "/api/tree"),
+			slog.Any("error", encodeErr))
 	}
 }
 
@@ -247,7 +256,9 @@ func (s *Server) handleMultipleTreePaths(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	var encodeErr error
 	if encodeErr = json.NewEncoder(w).Encode(trees); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response",
+			slog.String("endpoint", "/api/tree"),
+			slog.Any("error", encodeErr))
 	}
 }
 
@@ -257,7 +268,7 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 	defaultProfile, err := database.GetDefaultQualityProfile(s.db)
 	if err != nil {
 		// If no default profile exists, log it but continue (all files will be non-convertible)
-		fmt.Fprintf(os.Stderr, "Warning: no default quality profile found: %v\n", err)
+		s.log.Warn("No default quality profile found", slog.Any("error", err))
 	}
 
 	// Get file info
@@ -490,7 +501,7 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 			"message": err.Error(),
 			"count":   0,
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -509,7 +520,7 @@ func (s *Server) handleConvert(w http.ResponseWriter, r *http.Request) {
 		"count":   count,
 		"message": fmt.Sprintf("Added %d file(s) to queue", count),
 	}); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 	}
 }
 
@@ -523,7 +534,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	// Import scanner package
 	var fileCount int
 	var err error
-	fileCount, err = scanner.ScanOnce(r.Context(), s.cfg, s.db)
+	fileCount, err = scanner.ScanOnce(r.Context(), s.cfg, s.db, s.log)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -539,7 +550,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		"file_count": fileCount,
 		"message":    fmt.Sprintf("Scan complete: %d files found", fileCount),
 	}); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 	}
 }
 
@@ -588,7 +599,7 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	var encodeErr error
 	if encodeErr = json.NewEncoder(w).Encode(items); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 	}
 }
 
@@ -661,7 +672,9 @@ func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": "Queue item deleted successfully",
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", err)
+		s.log.Error("Failed to encode JSON response",
+			slog.String("endpoint", "/api/queue/delete"),
+			slog.Any("error", err))
 	}
 }
 
@@ -696,7 +709,7 @@ func (s *Server) handleQueueLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	var encodeErr error
 	if encodeErr = json.NewEncoder(w).Encode(logs); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 	}
 }
 
@@ -765,7 +778,7 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		var encodeErr error
 		if encodeErr = json.NewEncoder(w).Encode(profiles); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 
 	case http.MethodPost:
@@ -781,7 +794,7 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
 			"message": "Method not allowed",
 			"error":   "Only GET and POST methods are supported",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 	}
 }
@@ -808,7 +821,7 @@ func (s *Server) handleProfileCreateJSON(w http.ResponseWriter, r *http.Request)
 			"message": "Invalid JSON body",
 			"error":   err.Error(),
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -823,7 +836,7 @@ func (s *Server) handleProfileCreateJSON(w http.ResponseWriter, r *http.Request)
 			"message": "name is required",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -837,7 +850,7 @@ func (s *Server) handleProfileCreateJSON(w http.ResponseWriter, r *http.Request)
 			"message": "mode must be 'vbr', 'cbr', or 'cbr_percent'",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -852,7 +865,7 @@ func (s *Server) handleProfileCreateJSON(w http.ResponseWriter, r *http.Request)
 			"message": "target_bitrate_bps must be greater than 0 for CBR mode",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -866,7 +879,7 @@ func (s *Server) handleProfileCreateJSON(w http.ResponseWriter, r *http.Request)
 			"message": "at least one of quality or bitrate_multiplier must be set for VBR mode",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -880,7 +893,7 @@ func (s *Server) handleProfileCreateJSON(w http.ResponseWriter, r *http.Request)
 			"message": "bitrate_multiplier must be greater than 0 for CBR_PERCENT mode",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -925,7 +938,7 @@ func (s *Server) handleProfileCreateJSON(w http.ResponseWriter, r *http.Request)
 				"message": "failed to unset other defaults",
 				"error":   err.Error(),
 			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+				s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 			}
 			return
 		}
@@ -943,7 +956,7 @@ func (s *Server) handleProfileCreateJSON(w http.ResponseWriter, r *http.Request)
 			"message": "failed to create profile",
 			"error":   err.Error(),
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -958,7 +971,7 @@ func (s *Server) handleProfileCreateJSON(w http.ResponseWriter, r *http.Request)
 		"message": "Profile created successfully",
 		"profile": profile,
 	}); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 	}
 }
 
@@ -996,7 +1009,7 @@ func (s *Server) handleProfileGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	var encodeErr error
 	if encodeErr = json.NewEncoder(w).Encode(profile); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 	}
 }
 
@@ -1024,7 +1037,7 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 			"message": "name is required",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1037,7 +1050,7 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 			"message": "mode must be 'vbr', 'cbr', or 'cbr_percent'",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1057,7 +1070,7 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 				"message": "invalid target_bitrate",
 				"error":   "validation error",
 			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+				s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 			}
 			return
 		}
@@ -1072,7 +1085,7 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 				"message": "invalid quality_level",
 				"error":   "validation error",
 			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+				s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 			}
 			return
 		}
@@ -1087,7 +1100,7 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 				"message": "invalid bitrate_multiplier",
 				"error":   "validation error",
 			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+				s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 			}
 			return
 		}
@@ -1102,7 +1115,7 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 			"message": "target_bitrate must be greater than 0 for CBR mode",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1115,7 +1128,7 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 			"message": "at least one of quality_level or bitrate_multiplier must be set for VBR mode",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1128,7 +1141,7 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 			"message": "bitrate_multiplier must be greater than 0 for CBR_PERCENT mode",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1155,7 +1168,7 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 			"message": "failed to create profile",
 			"error":   err.Error(),
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1170,7 +1183,7 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 		"message": "Profile created successfully",
 		"profile": profile,
 	}); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 	}
 }
 
@@ -1200,7 +1213,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 			"message": "id is required",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1215,7 +1228,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 			"message": "invalid id",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1229,7 +1242,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 			"message": "id parameter too large",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1244,7 +1257,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 			"message": "profile not found",
 			"error":   err.Error(),
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1265,7 +1278,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 				"message": "mode must be 'vbr' or 'cbr'",
 				"error":   "validation error",
 			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+				s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 			}
 			return
 		}
@@ -1282,7 +1295,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 				"message": "invalid target_bitrate",
 				"error":   "validation error",
 			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+				s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 			}
 			return
 		}
@@ -1299,7 +1312,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 				"message": "invalid quality_level",
 				"error":   "validation error",
 			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+				s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 			}
 			return
 		}
@@ -1316,7 +1329,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 				"message": "invalid bitrate_multiplier",
 				"error":   "validation error",
 			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+				s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 			}
 			return
 		}
@@ -1348,7 +1361,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 				"message": "failed to unset other defaults",
 				"error":   err.Error(),
 			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+				s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 			}
 			return
 		}
@@ -1366,7 +1379,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 			"message": "target_bitrate must be greater than 0 for CBR mode",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1379,7 +1392,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 			"message": "at least one of quality_level or bitrate_multiplier must be set for VBR mode",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1393,7 +1406,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 			"message": "failed to update profile",
 			"error":   err.Error(),
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1408,7 +1421,7 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 		"message": "Profile updated successfully",
 		"profile": profile,
 	}); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 	}
 }
 
@@ -1432,7 +1445,7 @@ func (s *Server) handleProfileDelete(w http.ResponseWriter, r *http.Request) {
 			"message": "id is required",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1447,7 +1460,7 @@ func (s *Server) handleProfileDelete(w http.ResponseWriter, r *http.Request) {
 			"message": "invalid id",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1461,7 +1474,7 @@ func (s *Server) handleProfileDelete(w http.ResponseWriter, r *http.Request) {
 			"message": "id parameter too large",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1475,7 +1488,7 @@ func (s *Server) handleProfileDelete(w http.ResponseWriter, r *http.Request) {
 			"message": "failed to delete profile",
 			"error":   err.Error(),
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1489,7 +1502,7 @@ func (s *Server) handleProfileDelete(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": "Profile deleted successfully",
 	}); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 	}
 }
 
@@ -1562,7 +1575,7 @@ func (s *Server) handleProfileUpdateJSON(w http.ResponseWriter, r *http.Request,
 			"message": "Invalid JSON body",
 			"error":   err.Error(),
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1578,7 +1591,7 @@ func (s *Server) handleProfileUpdateJSON(w http.ResponseWriter, r *http.Request,
 			"message": "Profile not found",
 			"error":   err.Error(),
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1598,7 +1611,7 @@ func (s *Server) handleProfileUpdateJSON(w http.ResponseWriter, r *http.Request,
 				"message": "mode must be 'vbr', 'cbr', or 'cbr_percent'",
 				"error":   "validation error",
 			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+				s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 			}
 			return
 		}
@@ -1634,7 +1647,7 @@ func (s *Server) handleProfileUpdateJSON(w http.ResponseWriter, r *http.Request,
 				"message": "failed to unset other defaults",
 				"error":   err.Error(),
 			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+				s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 			}
 			return
 		}
@@ -1651,7 +1664,7 @@ func (s *Server) handleProfileUpdateJSON(w http.ResponseWriter, r *http.Request,
 			"message": "target_bitrate_bps must be greater than 0 for CBR mode",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1666,7 +1679,7 @@ func (s *Server) handleProfileUpdateJSON(w http.ResponseWriter, r *http.Request,
 			"message": "failed to update profile",
 			"error":   err.Error(),
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1681,7 +1694,7 @@ func (s *Server) handleProfileUpdateJSON(w http.ResponseWriter, r *http.Request,
 		"message": "Profile updated successfully",
 		"profile": profile,
 	}); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 	}
 }
 
@@ -1697,7 +1710,7 @@ func (s *Server) handleProfileDeleteByID(w http.ResponseWriter, profileID uint) 
 			"message": "failed to delete profile",
 			"error":   err.Error(),
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1711,7 +1724,7 @@ func (s *Server) handleProfileDeleteByID(w http.ResponseWriter, profileID uint) 
 		"success": true,
 		"message": "Profile deleted successfully",
 	}); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 	}
 }
 
@@ -1731,7 +1744,7 @@ func (s *Server) parseQualityProfileID(w http.ResponseWriter, qualityProfileIDSt
 				"message": "invalid quality_profile_id",
 				"error":   "validation error",
 			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+				s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 			}
 			return 0, false
 		}
@@ -1746,7 +1759,7 @@ func (s *Server) parseQualityProfileID(w http.ResponseWriter, qualityProfileIDSt
 				"message": "quality_profile_id too large",
 				"error":   "validation error",
 			}); encodeErr != nil {
-				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+				s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 			}
 			return 0, false
 		}
@@ -1775,7 +1788,7 @@ func (s *Server) handleSetFileQualityProfile(w http.ResponseWriter, r *http.Requ
 			"message": "file_id is required",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1792,7 +1805,7 @@ func (s *Server) handleSetFileQualityProfile(w http.ResponseWriter, r *http.Requ
 			"message": "invalid file_id",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1807,7 +1820,7 @@ func (s *Server) handleSetFileQualityProfile(w http.ResponseWriter, r *http.Requ
 			"message": "file_id too large",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1828,7 +1841,7 @@ func (s *Server) handleSetFileQualityProfile(w http.ResponseWriter, r *http.Requ
 			"message": "failed to update file quality profile",
 			"error":   err.Error(),
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1839,7 +1852,7 @@ func (s *Server) handleSetFileQualityProfile(w http.ResponseWriter, r *http.Requ
 		"success": true,
 		"message": "File quality profile updated successfully",
 	}); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 	}
 }
 
@@ -1863,7 +1876,7 @@ func (s *Server) handleSetFolderQualityProfile(w http.ResponseWriter, r *http.Re
 			"message": "folder_path is required",
 			"error":   "validation error",
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1885,7 +1898,7 @@ func (s *Server) handleSetFolderQualityProfile(w http.ResponseWriter, r *http.Re
 			"message": "failed to update folder quality profile",
 			"error":   err.Error(),
 		}); encodeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 		}
 		return
 	}
@@ -1906,7 +1919,7 @@ func (s *Server) handleSetFolderQualityProfile(w http.ResponseWriter, r *http.Re
 		"success": true,
 		"message": "Folder quality profile updated successfully",
 	}); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 	}
 }
 
@@ -2015,7 +2028,7 @@ func (s *Server) handleFilesFiltered(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	var encodeErr error
 	if encodeErr = json.NewEncoder(w).Encode(response); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 	}
 }
 
@@ -2083,6 +2096,6 @@ func (s *Server) handleBulkConvert(w http.ResponseWriter, r *http.Request) {
 		"count":   successCount,
 		"message": fmt.Sprintf("Added %d file(s) to queue", successCount),
 	}); encodeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		s.log.Error("Failed to encode JSON response", slog.Any("error", encodeErr))
 	}
 }
