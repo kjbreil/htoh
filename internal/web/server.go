@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kjbreil/opti/internal/config"
 	"github.com/kjbreil/opti/internal/database"
@@ -228,8 +229,21 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSingleTreePath(w http.ResponseWriter, path string) {
 	tree, err := s.buildTree(path)
 	if err != nil {
+		s.log.Error("Failed to build tree",
+			slog.String("endpoint", "/api/tree"),
+			slog.String("path", path),
+			slog.Any("error", err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	// Validate UTF-8 in tree structure
+	if invalidPaths := s.validateTreeUTF8(tree); len(invalidPaths) > 0 {
+		s.log.Error("Tree contains invalid UTF-8 characters",
+			slog.String("endpoint", "/api/tree"),
+			slog.String("path", path),
+			slog.Int("invalid_path_count", len(invalidPaths)),
+			slog.Any("invalid_paths", invalidPaths))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -237,6 +251,7 @@ func (s *Server) handleSingleTreePath(w http.ResponseWriter, path string) {
 	if encodeErr = json.NewEncoder(w).Encode(tree); encodeErr != nil {
 		s.log.Error("Failed to encode JSON response",
 			slog.String("endpoint", "/api/tree"),
+			slog.String("path", path),
 			slog.Any("error", encodeErr))
 	}
 }
@@ -248,8 +263,22 @@ func (s *Server) handleMultipleTreePaths(w http.ResponseWriter) {
 		tree, err := s.buildTree(sourceDir)
 		if err != nil {
 			// Log error but continue with other directories
+			s.log.Error("Failed to build tree for source directory",
+				slog.String("endpoint", "/api/tree"),
+				slog.String("source_dir", sourceDir),
+				slog.Any("error", err))
 			continue
 		}
+
+		// Validate UTF-8 in tree structure
+		if invalidPaths := s.validateTreeUTF8(tree); len(invalidPaths) > 0 {
+			s.log.Error("Tree contains invalid UTF-8 characters",
+				slog.String("endpoint", "/api/tree"),
+				slog.String("source_dir", sourceDir),
+				slog.Int("invalid_path_count", len(invalidPaths)),
+				slog.Any("invalid_paths", invalidPaths))
+		}
+
 		trees = append(trees, *tree)
 	}
 
@@ -258,17 +287,23 @@ func (s *Server) handleMultipleTreePaths(w http.ResponseWriter) {
 	if encodeErr = json.NewEncoder(w).Encode(trees); encodeErr != nil {
 		s.log.Error("Failed to encode JSON response",
 			slog.String("endpoint", "/api/tree"),
+			slog.Int("tree_count", len(trees)),
 			slog.Any("error", encodeErr))
 	}
 }
 
 // buildTree builds a directory tree structure.
 func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
+	s.log.Debug("Building tree",
+		slog.String("root_path", rootPath))
+
 	// Get default quality profile for convertibility checks
 	defaultProfile, err := database.GetDefaultQualityProfile(s.db)
 	if err != nil {
 		// If no default profile exists, log it but continue (all files will be non-convertible)
-		s.log.Warn("No default quality profile found", slog.Any("error", err))
+		s.log.Warn("No default quality profile found",
+			slog.String("root_path", rootPath),
+			slog.Any("error", err))
 	}
 
 	// Get file info
@@ -310,7 +345,16 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 				if defaultProfile != nil {
 					root.CanConvert = database.IsEligibleForConversionWithProfile(mediaInfo, defaultProfile)
 				}
+			} else {
+				s.log.Warn("Failed to get media info for file",
+					slog.String("file_path", rootPath),
+					slog.Uint64("file_id", uint64(file.ID)),
+					slog.Any("error", err))
 			}
+		} else {
+			s.log.Warn("Failed to get file from database",
+				slog.String("file_path", rootPath),
+				slog.Any("error", err))
 		}
 		return root, nil
 	}
@@ -319,8 +363,15 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 	var files []database.File
 	var dbErr error
 	if dbErr = s.db.Where("path LIKE ?", rootPath+"%").Find(&files).Error; dbErr != nil {
+		s.log.Error("Failed to query files from database",
+			slog.String("root_path", rootPath),
+			slog.Any("error", dbErr))
 		return nil, dbErr
 	}
+
+	s.log.Debug("Queried files from database",
+		slog.String("root_path", rootPath),
+		slog.Int("file_count", len(files)))
 
 	// Build file map
 	fileMap := make(map[string]*database.File)
@@ -334,6 +385,10 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 		return nil, fmt.Errorf("failed to read directory %s: %w", rootPath, err)
 	}
 
+	s.log.Debug("Read directory entries",
+		slog.String("root_path", rootPath),
+		slog.Int("entry_count", len(entries)))
+
 	// Process entries
 	for _, entry := range entries {
 		childPath := filepath.Join(rootPath, entry.Name())
@@ -343,6 +398,10 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 			var childNode *TreeNode
 			childNode, err = s.buildTree(childPath)
 			if err != nil {
+				s.log.Warn("Failed to build tree for subdirectory, skipping",
+					slog.String("parent_path", rootPath),
+					slog.String("child_path", childPath),
+					slog.Any("error", err))
 				continue
 			}
 			root.Children = append(root.Children, *childNode)
@@ -382,7 +441,17 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 					if defaultProfile != nil {
 						childNode.CanConvert = database.IsEligibleForConversionWithProfile(mediaInfo, defaultProfile)
 					}
+				} else {
+					s.log.Warn("Failed to get media info for child file",
+						slog.String("parent_path", rootPath),
+						slog.String("child_path", childPath),
+						slog.Uint64("file_id", uint64(file.ID)),
+						slog.Any("error", err))
 				}
+			} else {
+				s.log.Debug("File not found in database",
+					slog.String("parent_path", rootPath),
+					slog.String("child_path", childPath))
 			}
 
 			root.Children = append(root.Children, *childNode)
@@ -409,8 +478,16 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 		if aggErr == nil {
 			root.QualityProfileID = profileID
 			root.ProfileIsMixed = isMixed
+		} else {
+			s.log.Warn("Failed to get folder profile aggregation",
+				slog.String("root_path", rootPath),
+				slog.Any("error", aggErr))
 		}
 	}
+
+	s.log.Debug("Completed building tree",
+		slog.String("root_path", rootPath),
+		slog.Int("child_count", len(root.Children)))
 
 	return root, nil
 }
@@ -627,6 +704,45 @@ func formatCodec(codec string) string {
 	default:
 		return codec
 	}
+}
+
+// validateTreeUTF8 recursively validates UTF-8 encoding in a tree node and its children.
+// Returns a slice of paths that contain invalid UTF-8 characters.
+func (s *Server) validateTreeUTF8(node *TreeNode) []string {
+	var invalidPaths []string
+
+	// Check current node's string fields
+	if !utf8.ValidString(node.Name) {
+		invalidPaths = append(invalidPaths, node.Path+" (invalid name)")
+		s.log.Warn("Invalid UTF-8 in tree node name",
+			slog.String("path", node.Path),
+			slog.String("name_bytes", fmt.Sprintf("%q", node.Name)))
+	}
+	if !utf8.ValidString(node.Path) {
+		invalidPaths = append(invalidPaths, node.Path+" (invalid path)")
+		s.log.Warn("Invalid UTF-8 in tree node path",
+			slog.String("path_bytes", fmt.Sprintf("%q", node.Path)))
+	}
+	if !utf8.ValidString(node.Codec) {
+		invalidPaths = append(invalidPaths, node.Path+" (invalid codec)")
+		s.log.Warn("Invalid UTF-8 in tree node codec",
+			slog.String("path", node.Path),
+			slog.String("codec_bytes", fmt.Sprintf("%q", node.Codec)))
+	}
+	if !utf8.ValidString(node.Status) {
+		invalidPaths = append(invalidPaths, node.Path+" (invalid status)")
+		s.log.Warn("Invalid UTF-8 in tree node status",
+			slog.String("path", node.Path),
+			slog.String("status_bytes", fmt.Sprintf("%q", node.Status)))
+	}
+
+	// Recursively check children
+	for i := range node.Children {
+		childInvalid := s.validateTreeUTF8(&node.Children[i])
+		invalidPaths = append(invalidPaths, childInvalid...)
+	}
+
+	return invalidPaths
 }
 
 // handleQueueDelete handles deletion of a queue item.

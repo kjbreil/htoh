@@ -226,6 +226,9 @@ func initializeLogger(cfg config.Config) *slog.Logger {
 		level = logger.DefaultLevel
 	}
 
+	// TEMPORARY: Force debug logging for troubleshooting
+	level = slog.LevelDebug
+
 	return logger.NewLogger(level, os.Stdout)
 }
 
