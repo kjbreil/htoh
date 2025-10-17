@@ -225,7 +225,7 @@
             // Convert or Requeue button with profile dropdown
             if (canConvert) {
                 const disabled = node.status === 'queued' || node.status === 'processing';
-                const dropdownId = 'profile-' + btoa(node.path).replace(/[^a-zA-Z0-9]/g, '');
+                const dropdownId = 'profile-' + simpleHash(node.path);
                 const isMixed = node.is_dir && node.profile_is_mixed;
                 html += '<select class="profile-dropdown" id="' + dropdownId + '" onchange="setQualityProfile(' + (node.is_dir ? 'null' : node.file_id) + ', \'' + escapeHtml(node.path) + '\', ' + node.is_dir + ', this.value)">' + renderProfileDropdown(node.quality_profile_id, isMixed) + '</select>';
                 html += '<button class="btn btn-primary" onclick="convert(\'' +
@@ -233,7 +233,7 @@
                         (disabled ? 'disabled' : '') + '>Convert</button>';
             } else if (node.status === 'failed' && !node.is_dir && (node.codec === 'h264' || node.codec === 'avc')) {
                 // Show requeue button for failed H.264 files
-                const dropdownId = 'profile-' + btoa(node.path).replace(/[^a-zA-Z0-9]/g, '');
+                const dropdownId = 'profile-' + simpleHash(node.path);
                 html += '<select class="profile-dropdown" id="' + dropdownId + '" onchange="setQualityProfile(' + node.file_id + ', \'' + escapeHtml(node.path) + '\', false, this.value)">' + renderProfileDropdown(node.quality_profile_id, false) + '</select>';
                 html += '<button class="btn btn-requeue" onclick="convert(\'' +
                         escapeHtml(node.path) + '\', false, \'' + dropdownId + '\')">Requeue</button>';
@@ -391,6 +391,16 @@
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+
+        // UTF-8-safe string hash function for generating unique IDs
+        function simpleHash(str) {
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = ((hash << 5) - hash) + str.charCodeAt(i);
+                hash |= 0; // Convert to 32-bit integer
+            }
+            return Math.abs(hash).toString();
         }
 
         function formatSize(bytes) {
