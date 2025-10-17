@@ -112,6 +112,11 @@ func (s *Server) Start(ctx context.Context, port int) error {
 	// RESTful routes with ID in path (must come after exact matches)
 	mux.HandleFunc("/api/profiles/", s.handleProfileByID)
 
+	// File quality profile route
+	mux.HandleFunc("/api/files/set-quality-profile", s.handleSetFileQualityProfile)
+	// Folder quality profile route
+	mux.HandleFunc("/api/folders/set-quality-profile", s.handleSetFolderQualityProfile)
+
 	addr := fmt.Sprintf("0.0.0.0:%d", port)
 	server := &http.Server{
 		Addr:              addr,
@@ -146,16 +151,18 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 
 // TreeNode represents a node in the directory tree.
 type TreeNode struct {
-	Name       string       `json:"name"`
-	Path       string       `json:"path"`
-	IsDir      bool         `json:"is_dir"`
-	FileID     uint         `json:"file_id,omitempty"`
-	Codec      string       `json:"codec,omitempty"`
-	Size       int64        `json:"size,omitempty"`
-	Status     string       `json:"status,omitempty"`
-	CanConvert bool         `json:"can_convert,omitempty"`
-	Children   []TreeNode   `json:"children,omitempty"`
-	Stats      *FolderStats `json:"stats,omitempty"`
+	Name             string       `json:"name"`
+	Path             string       `json:"path"`
+	IsDir            bool         `json:"is_dir"`
+	FileID           uint         `json:"file_id,omitempty"`
+	Codec            string       `json:"codec,omitempty"`
+	Size             int64        `json:"size,omitempty"`
+	Status           string       `json:"status,omitempty"`
+	CanConvert       bool         `json:"can_convert,omitempty"`
+	QualityProfileID uint         `json:"quality_profile_id,omitempty"` // user's preferred quality profile (0 = use default)
+	ProfileIsMixed   bool         `json:"profile_is_mixed,omitempty"`   // true if folder contains files with different profiles
+	Children         []TreeNode   `json:"children,omitempty"`
+	Stats            *FolderStats `json:"stats,omitempty"`
 }
 
 // FolderStats represents aggregate statistics for a folder.
@@ -250,6 +257,7 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 			root.FileID = file.ID
 			root.Size = file.Size
 			root.Status = file.Status
+			root.QualityProfileID = file.QualityProfileID
 
 			var mediaInfo *database.MediaInfo
 			mediaInfo, err = database.GetMediaInfoByFileID(s.db, file.ID)
@@ -312,6 +320,7 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 				childNode.FileID = file.ID
 				childNode.Size = file.Size
 				childNode.Status = file.Status
+				childNode.QualityProfileID = file.QualityProfileID
 
 				var mediaInfo *database.MediaInfo
 				mediaInfo, err = database.GetMediaInfoByFileID(s.db, file.ID)
@@ -338,6 +347,18 @@ func (s *Server) buildTree(rootPath string) (*TreeNode, error) {
 
 	// Calculate folder stats
 	root.Stats = s.calculateFolderStats(&root.Children)
+
+	// Calculate folder profile aggregation (only for directories)
+	if root.IsDir {
+		var profileID uint
+		var isMixed bool
+		var aggErr error
+		profileID, isMixed, aggErr = database.GetFolderProfileAggregation(s.db, rootPath)
+		if aggErr == nil {
+			root.QualityProfileID = profileID
+			root.ProfileIsMixed = isMixed
+		}
+	}
 
 	return root, nil
 }
@@ -1703,6 +1724,215 @@ func (s *Server) handleProfileSetDefault(w http.ResponseWriter, r *http.Request)
 	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"message": "Default profile updated successfully",
+	}); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
+}
+
+// handleSetFileQualityProfile handles POST requests to set a file's preferred quality profile.
+func (s *Server) handleSetFileQualityProfile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse form values
+	fileIDStr := r.FormValue("file_id")
+	qualityProfileIDStr := r.FormValue("quality_profile_id")
+
+	if fileIDStr == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "file_id is required",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Parse file ID
+	var fileID uint64
+	var err error
+	if _, err = fmt.Sscanf(fileIDStr, "%d", &fileID); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "invalid file_id",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Check for overflow when converting uint64 to uint
+	if fileID > uint64(^uint(0)) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "file_id too large",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Parse quality profile ID (defaults to 0 if empty, which means "use default")
+	var qualityProfileID uint64
+	if qualityProfileIDStr != "" {
+		if _, err = fmt.Sscanf(qualityProfileIDStr, "%d", &qualityProfileID); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "invalid quality_profile_id",
+				"error":   "validation error",
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return
+		}
+
+		// Check for overflow when converting uint64 to uint
+		if qualityProfileID > uint64(^uint(0)) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "quality_profile_id too large",
+				"error":   "validation error",
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return
+		}
+	}
+
+	// Update the file's quality profile preference
+	if err = database.UpdateFileQualityProfile(s.db, uint(fileID), uint(qualityProfileID)); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "failed to update file quality profile",
+			"error":   err.Error(),
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "File quality profile updated successfully",
+	}); encodeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+	}
+}
+
+// handleSetFolderQualityProfile handles POST requests to set a folder's quality profile (cascading to all files below).
+func (s *Server) handleSetFolderQualityProfile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse form values
+	folderPath := r.FormValue("folder_path")
+	qualityProfileIDStr := r.FormValue("quality_profile_id")
+
+	if folderPath == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "folder_path is required",
+			"error":   "validation error",
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Parse quality profile ID (defaults to 0 if empty, which means "use default")
+	var qualityProfileID uint64
+	var err error
+	if qualityProfileIDStr != "" {
+		if _, err = fmt.Sscanf(qualityProfileIDStr, "%d", &qualityProfileID); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "invalid quality_profile_id",
+				"error":   "validation error",
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return
+		}
+
+		// Check for overflow when converting uint64 to uint
+		if qualityProfileID > uint64(^uint(0)) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			var encodeErr error
+			if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "quality_profile_id too large",
+				"error":   "validation error",
+			}); encodeErr != nil {
+				fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+			}
+			return
+		}
+	}
+
+	// Update the folder's quality profile (cascades to all files below)
+	if err = database.UpdateFolderQualityProfile(s.db, folderPath, uint(qualityProfileID)); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": "failed to update folder quality profile",
+			"error":   err.Error(),
+		}); encodeErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
+		}
+		return
+	}
+
+	// Broadcast folder profile changed event
+	var profileName string
+	if qualityProfileID > 0 {
+		profile, profileErr := database.GetQualityProfileByID(s.db, uint(qualityProfileID))
+		if profileErr == nil {
+			profileName = profile.Name
+		}
+	}
+	s.broadcaster.BroadcastFolderProfileChanged(folderPath, uint(qualityProfileID), profileName)
+
+	w.Header().Set("Content-Type", "application/json")
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Folder quality profile updated successfully",
 	}); encodeErr != nil {
 		fmt.Fprintf(os.Stderr, "Failed to encode JSON response: %v\n", encodeErr)
 	}

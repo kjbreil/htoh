@@ -21,14 +21,16 @@ const (
 
 // File represents a video file on disk with its metadata.
 type File struct {
-	ID        uint      `gorm:"primaryKey"           json:"id"`
-	Path      string    `gorm:"uniqueIndex;not null" json:"path"`     // absolute path
-	Name      string    `                            json:"name"`     // filename
-	Size      int64     `                            json:"size"`     // file size in bytes
-	ModTime   time.Time `                            json:"mod_time"` // last modified time
-	Status    string    `                            json:"status"`   // queued, processing, done, failed
-	CreatedAt time.Time `                            json:"created_at"`
-	UpdatedAt time.Time `                            json:"updated_at"`
+	ID               uint            `gorm:"primaryKey"           json:"id"`
+	Path             string          `gorm:"uniqueIndex;not null" json:"path"`               // absolute path
+	Name             string          `                            json:"name"`               // filename
+	Size             int64           `                            json:"size"`               // file size in bytes
+	ModTime          time.Time       `                            json:"mod_time"`           // last modified time
+	Status           string          `                            json:"status"`             // queued, processing, done, failed
+	QualityProfileID uint            `gorm:"default:0"            json:"quality_profile_id"` // user's preferred quality profile (0 = use default)
+	QualityProfile   *QualityProfile `gorm:"foreignKey:QualityProfileID" json:"quality_profile,omitempty"`
+	CreatedAt        time.Time       `                            json:"created_at"`
+	UpdatedAt        time.Time       `                            json:"updated_at"`
 }
 
 // MediaInfo stores ffprobe results, one-to-one with File.
@@ -588,4 +590,88 @@ func DeleteTaskLogsByQueueItem(db *gorm.DB, queueItemID uint) error {
 		return fmt.Errorf("failed to delete task logs: %w", err)
 	}
 	return nil
+}
+
+// UpdateFileQualityProfile updates the quality profile preference for a file.
+func UpdateFileQualityProfile(db *gorm.DB, fileID uint, qualityProfileID uint) error {
+	// If qualityProfileID is not 0, validate that it exists
+	if qualityProfileID != 0 {
+		var profile QualityProfile
+		result := db.Where("id = ?", qualityProfileID).First(&profile)
+		if result.Error != nil {
+			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("quality profile with ID %d not found", qualityProfileID)
+			}
+			return fmt.Errorf("failed to validate quality profile: %w", result.Error)
+		}
+	}
+
+	// Update the file's quality profile ID
+	if err := db.Model(&File{}).Where("id = ?", fileID).Update("quality_profile_id", qualityProfileID).Error; err != nil {
+		return fmt.Errorf("failed to update file quality profile: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateFolderQualityProfile updates the quality profile for all files in a folder (recursively).
+// This enables cascading profile changes down the directory tree.
+func UpdateFolderQualityProfile(db *gorm.DB, folderPath string, qualityProfileID uint) error {
+	// If qualityProfileID is not 0, validate that it exists
+	if qualityProfileID != 0 {
+		var profile QualityProfile
+		result := db.Where("id = ?", qualityProfileID).First(&profile)
+		if result.Error != nil {
+			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("quality profile with ID %d not found", qualityProfileID)
+			}
+			return fmt.Errorf("failed to validate quality profile: %w", result.Error)
+		}
+	}
+
+	// Update all files in the folder and subfolders
+	// Use LIKE with % to match all files under this path
+	if err := db.Model(&File{}).
+		Where("path LIKE ?", folderPath+"%").
+		Update("quality_profile_id", qualityProfileID).Error; err != nil {
+		return fmt.Errorf("failed to update folder quality profiles: %w", err)
+	}
+
+	return nil
+}
+
+// GetFolderProfileAggregation determines the aggregated profile state for a folder.
+// Returns the common profile ID if all files have the same profile, or indicates mixed state.
+// Returns:
+//   - (profileID, false, nil) if all files have the same profile
+//   - (0, true, nil) if files have different profiles (mixed state)
+//   - (0, false, nil) if no files found in the folder
+func GetFolderProfileAggregation(db *gorm.DB, folderPath string) (uint, bool, error) {
+	// Query all files under this folder path
+	var files []File
+	if err := db.Where("path LIKE ?", folderPath+"%").Find(&files).Error; err != nil {
+		return 0, false, fmt.Errorf("failed to query files in folder: %w", err)
+	}
+
+	// No files found
+	if len(files) == 0 {
+		return 0, false, nil
+	}
+
+	// Check if all files have the same profile
+	firstProfileID := files[0].QualityProfileID
+	allSame := true
+	for i := 1; i < len(files); i++ {
+		if files[i].QualityProfileID != firstProfileID {
+			allSame = false
+			break
+		}
+	}
+
+	if allSame {
+		return firstProfileID, false, nil
+	}
+
+	// Mixed profiles
+	return 0, true, nil
 }

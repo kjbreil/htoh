@@ -10,16 +10,17 @@ import (
 type EventType string
 
 const (
-	EventQueueAdded     EventType = "queue_added"
-	EventQueueUpdated   EventType = "queue_updated"
-	EventStatusChanged  EventType = "status_changed"
-	EventProgressUpdate EventType = "progress_update"
-	EventScanComplete   EventType = "scan_complete"
-	EventTaskLog        EventType = "task_log"
-	EventQueueItemHTML  EventType = "queue_item_html"
-	EventProfileCreated EventType = "profile_created"
-	EventProfileUpdated EventType = "profile_updated"
-	EventProfileDeleted EventType = "profile_deleted"
+	EventQueueAdded           EventType = "queue_added"
+	EventQueueUpdated         EventType = "queue_updated"
+	EventStatusChanged        EventType = "status_changed"
+	EventProgressUpdate       EventType = "progress_update"
+	EventScanComplete         EventType = "scan_complete"
+	EventTaskLog              EventType = "task_log"
+	EventQueueItemHTML        EventType = "queue_item_html"
+	EventProfileCreated       EventType = "profile_created"
+	EventProfileUpdated       EventType = "profile_updated"
+	EventProfileDeleted       EventType = "profile_deleted"
+	EventFolderProfileChanged EventType = "folder_profile_changed"
 )
 
 // Event represents a server-sent event.
@@ -196,6 +197,18 @@ func (eb *EventBroadcaster) BroadcastProfileDeleted(profileID uint) {
 		Type: EventProfileDeleted,
 		Data: map[string]interface{}{
 			"id": profileID,
+		},
+	})
+}
+
+// BroadcastFolderProfileChanged broadcasts a folder profile changed event.
+func (eb *EventBroadcaster) BroadcastFolderProfileChanged(folderPath string, profileID uint, profileName string) {
+	eb.Broadcast(Event{
+		Type: EventFolderProfileChanged,
+		Data: map[string]interface{}{
+			"folder_path":  folderPath,
+			"profile_id":   profileID,
+			"profile_name": profileName,
 		},
 	})
 }

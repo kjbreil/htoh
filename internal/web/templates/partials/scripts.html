@@ -64,6 +64,12 @@
             loadProfiles();
         });
 
+        eventSource.addEventListener('folder_profile_changed', (e) => {
+            const data = JSON.parse(e.data);
+            showNotification('Folder profile updated: ' + data.data.profile_name);
+            loadTree();
+        });
+
         eventSource.addEventListener('task_log', (e) => {
             const data = JSON.parse(e.data);
             const logData = data.data;
@@ -220,14 +226,15 @@
             if (canConvert) {
                 const disabled = node.status === 'queued' || node.status === 'processing';
                 const dropdownId = 'profile-' + btoa(node.path).replace(/[^a-zA-Z0-9]/g, '');
-                html += '<select class="profile-dropdown" id="' + dropdownId + '">' + renderProfileDropdown() + '</select>';
+                const isMixed = node.is_dir && node.profile_is_mixed;
+                html += '<select class="profile-dropdown" id="' + dropdownId + '" onchange="setQualityProfile(' + (node.is_dir ? 'null' : node.file_id) + ', \'' + escapeHtml(node.path) + '\', ' + node.is_dir + ', this.value)">' + renderProfileDropdown(node.quality_profile_id, isMixed) + '</select>';
                 html += '<button class="btn btn-primary" onclick="convert(\'' +
                         escapeHtml(node.path) + '\', ' + node.is_dir + ', \'' + dropdownId + '\')" ' +
                         (disabled ? 'disabled' : '') + '>Convert</button>';
             } else if (node.status === 'failed' && !node.is_dir && (node.codec === 'h264' || node.codec === 'avc')) {
                 // Show requeue button for failed H.264 files
                 const dropdownId = 'profile-' + btoa(node.path).replace(/[^a-zA-Z0-9]/g, '');
-                html += '<select class="profile-dropdown" id="' + dropdownId + '">' + renderProfileDropdown() + '</select>';
+                html += '<select class="profile-dropdown" id="' + dropdownId + '" onchange="setQualityProfile(' + node.file_id + ', \'' + escapeHtml(node.path) + '\', false, this.value)">' + renderProfileDropdown(node.quality_profile_id, false) + '</select>';
                 html += '<button class="btn btn-requeue" onclick="convert(\'' +
                         escapeHtml(node.path) + '\', false, \'' + dropdownId + '\')">Requeue</button>';
             }
@@ -262,14 +269,25 @@
             }
         }
 
-        function renderProfileDropdown() {
+        function renderProfileDropdown(selectedProfileID, isMixed) {
             if (!allProfiles || allProfiles.length === 0) {
                 return '<option value="">Default</option>';
             }
 
             let html = '';
+
+            // Add special "Mixed" option if isMixed is true
+            if (isMixed) {
+                html += '<option value="" disabled selected style="font-style: italic; color: #999;">Mixed Profiles</option>';
+            }
+
             for (const profile of allProfiles) {
-                const selected = profile.is_default ? ' selected' : '';
+                // If a specific profile is selected for this file, use it
+                // Otherwise, fall back to the default profile
+                const isSelected = selectedProfileID > 0 ?
+                    (profile.id === selectedProfileID) :
+                    profile.is_default;
+                const selected = (isSelected && !isMixed) ? ' selected' : '';
                 html += '<option value="' + profile.id + '"' + selected + '>' + escapeHtml(profile.name) + '</option>';
             }
             return html;
@@ -302,6 +320,43 @@
             })
             .catch(err => {
                 showNotification('Error: ' + err.message, true);
+            });
+        }
+
+        function setQualityProfile(fileId, path, isDir, qualityProfileId) {
+            const formData = new FormData();
+            formData.append('quality_profile_id', qualityProfileId || '0');
+
+            let endpoint;
+            if (isDir) {
+                // Folder profile change - cascades to all files below
+                endpoint = '/api/folders/set-quality-profile';
+                formData.append('folder_path', path);
+            } else {
+                // Individual file profile change
+                if (!fileId) {
+                    return;
+                }
+                endpoint = '/api/files/set-quality-profile';
+                formData.append('file_id', fileId);
+            }
+
+            fetch(endpoint, {
+                method: 'POST',
+                body: formData
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) {
+                    showNotification('Error saving profile preference: ' + data.message, true);
+                    // Reload tree to restore the previous selection
+                    loadTree();
+                }
+            })
+            .catch(err => {
+                showNotification('Error: ' + err.message, true);
+                // Reload tree to restore the previous selection
+                loadTree();
             });
         }
 
