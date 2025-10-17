@@ -17,6 +17,9 @@ const (
 	EventScanComplete   EventType = "scan_complete"
 	EventTaskLog        EventType = "task_log"
 	EventQueueItemHTML  EventType = "queue_item_html"
+	EventProfileCreated EventType = "profile_created"
+	EventProfileUpdated EventType = "profile_updated"
+	EventProfileDeleted EventType = "profile_deleted"
 )
 
 // Event represents a server-sent event.
@@ -157,6 +160,38 @@ func (eb *EventBroadcaster) BroadcastQueueItemHTML(queueItemID uint, html string
 		Data: map[string]interface{}{
 			"queue_item_id": queueItemID,
 			"html":          html,
+		},
+	})
+}
+
+// BroadcastProfileCreated broadcasts a profile created event.
+func (eb *EventBroadcaster) BroadcastProfileCreated(profileID uint, profileName string) {
+	eb.Broadcast(Event{
+		Type: EventProfileCreated,
+		Data: map[string]interface{}{
+			"id":   profileID,
+			"name": profileName,
+		},
+	})
+}
+
+// BroadcastProfileUpdated broadcasts a profile updated event.
+func (eb *EventBroadcaster) BroadcastProfileUpdated(profileID uint, profileName string) {
+	eb.Broadcast(Event{
+		Type: EventProfileUpdated,
+		Data: map[string]interface{}{
+			"id":   profileID,
+			"name": profileName,
+		},
+	})
+}
+
+// BroadcastProfileDeleted broadcasts a profile deleted event.
+func (eb *EventBroadcaster) BroadcastProfileDeleted(profileID uint) {
+	eb.Broadcast(Event{
+		Type: EventProfileDeleted,
+		Data: map[string]interface{}{
+			"id": profileID,
 		},
 	})
 }

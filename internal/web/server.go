@@ -870,6 +870,9 @@ func (s *Server) handleProfileCreateJSON(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Broadcast profile created event
+	s.broadcaster.BroadcastProfileCreated(profile.ID, profile.Name)
+
 	w.Header().Set("Content-Type", "application/json")
 	var encodeErr error
 	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1075,6 +1078,9 @@ func (s *Server) handleProfileCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
+	// Broadcast profile created event
+	s.broadcaster.BroadcastProfileCreated(profile.ID, profile.Name)
 
 	w.Header().Set("Content-Type", "application/json")
 	var encodeErr error
@@ -1299,6 +1305,9 @@ func (s *Server) handleProfileUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Broadcast profile updated event
+	s.broadcaster.BroadcastProfileUpdated(profile.ID, profile.Name)
+
 	w.Header().Set("Content-Type", "application/json")
 	var encodeErr error
 	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1377,6 +1386,9 @@ func (s *Server) handleProfileDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
+	// Broadcast profile deleted event
+	s.broadcaster.BroadcastProfileDeleted(uint(id))
 
 	w.Header().Set("Content-Type", "application/json")
 	var encodeErr error
@@ -1555,6 +1567,9 @@ func (s *Server) handleProfileUpdateJSON(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Broadcast profile updated event
+	s.broadcaster.BroadcastProfileUpdated(profile.ID, profile.Name)
+
 	w.Header().Set("Content-Type", "application/json")
 	var encodeErr error
 	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1582,6 +1597,9 @@ func (s *Server) handleProfileDeleteByID(w http.ResponseWriter, r *http.Request,
 		}
 		return
 	}
+
+	// Broadcast profile deleted event
+	s.broadcaster.BroadcastProfileDeleted(profileID)
 
 	w.Header().Set("Content-Type", "application/json")
 	var encodeErr error

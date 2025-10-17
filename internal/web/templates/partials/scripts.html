@@ -651,6 +651,8 @@
                 .then(profiles => {
                     allProfiles = profiles || [];
                     document.getElementById('profiles-container').innerHTML = renderProfiles(profiles);
+                    // Refresh the Files tab tree to update profile dropdowns
+                    loadTree();
                 })
                 .catch(err => {
                     document.getElementById('profiles-container').innerHTML =
