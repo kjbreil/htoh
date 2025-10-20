@@ -2,6 +2,11 @@
         // Initialize SSE connection
         const eventSource = new EventSource('/api/events');
 
+        // Cleanup SSE connection on page unload to prevent refresh hangs
+        window.addEventListener('beforeunload', () => {
+            eventSource.close();
+        });
+
         eventSource.addEventListener('connected', (e) => {
             console.log('Connected to event stream');
         });
@@ -9,8 +14,11 @@
         eventSource.addEventListener('queue_added', (e) => {
             const data = JSON.parse(e.data);
             showNotification('File added to queue: ' + data.data.file_name);
-            // Reload tree to update status
-            setTimeout(() => loadTree(), 500);
+            // Reload tree to update status and queue to show new items
+            setTimeout(() => {
+                loadTree();
+                loadQueue();
+            }, 500);
         });
 
         eventSource.addEventListener('queue_updated', (e) => {
@@ -445,6 +453,15 @@
                 content.classList.remove('active');
             });
             document.getElementById(tabName + '-tab').classList.add('active');
+
+            // Reload data when switching to specific tabs
+            if (tabName === 'queue') {
+                loadQueue();
+            } else if (tabName === 'files') {
+                loadTree();
+            } else if (tabName === 'profiles') {
+                loadProfiles();
+            }
         }
 
         // Load queue
@@ -458,6 +475,7 @@
             fetch('/api/queue')
                 .then(r => r.json())
                 .then(items => {
+                    currentQueueItems = items || [];
                     document.getElementById('queue-container').innerHTML = renderQueue(items);
 
                     // Restore expanded states and reload logs
@@ -476,6 +494,9 @@
                             }
                         }
                     });
+
+                    // Update selection count after loading
+                    updateQueueSelectedCount();
                 })
                 .catch(err => {
                     document.getElementById('queue-container').innerHTML =
@@ -500,11 +521,13 @@
                 const status = item.status || 'queued';
                 const error = item.error_message || '';
                 const itemId = item.id;
+                const isSelected = selectedQueueItems.has(itemId);
 
-                html += '<li class="queue-item" id="queue-item-' + itemId + '">';
+                html += '<li class="queue-item' + (isSelected ? ' selected' : '') + '" id="queue-item-' + itemId + '">';
 
                 // Header
                 html += '<div class="queue-item-header">';
+                html += '<input type="checkbox" class="queue-checkbox" data-item-id="' + itemId + '" onchange="toggleQueueItemSelection(' + itemId + ')" ' + (isSelected ? 'checked' : '') + '>';
                 html += '<button class="queue-expand-btn" onclick="toggleQueueItem(' + itemId + ')">▶</button>';
                 html += '<span class="queue-item-name" onclick="toggleQueueItem(' + itemId + ')">' + escapeHtml(fileName) + '</span>';
 
@@ -552,6 +575,10 @@
 
         // Track which items have loaded logs
         const logsLoaded = new Set();
+
+        // Track selected queue items for bulk operations
+        let selectedQueueItems = new Set();
+        let currentQueueItems = [];
 
         function toggleQueueItem(itemId) {
             const item = document.getElementById('queue-item-' + itemId);
@@ -699,6 +726,102 @@
             }
         }
 
+        function toggleQueueItemSelection(itemId) {
+            if (selectedQueueItems.has(itemId)) {
+                selectedQueueItems.delete(itemId);
+            } else {
+                selectedQueueItems.add(itemId);
+            }
+
+            // Update visual state
+            const item = document.getElementById('queue-item-' + itemId);
+            if (item) {
+                if (selectedQueueItems.has(itemId)) {
+                    item.classList.add('selected');
+                } else {
+                    item.classList.remove('selected');
+                }
+            }
+
+            updateQueueSelectedCount();
+        }
+
+        function toggleSelectAllQueue() {
+            const selectAll = document.getElementById('select-all-queue').checked;
+            selectedQueueItems.clear();
+
+            if (selectAll) {
+                for (const item of currentQueueItems) {
+                    selectedQueueItems.add(item.id);
+                }
+            }
+
+            // Update all checkboxes and visual state
+            document.querySelectorAll('.queue-checkbox').forEach(checkbox => {
+                checkbox.checked = selectAll;
+                const item = checkbox.closest('.queue-item');
+                if (item) {
+                    if (selectAll) {
+                        item.classList.add('selected');
+                    } else {
+                        item.classList.remove('selected');
+                    }
+                }
+            });
+
+            updateQueueSelectedCount();
+        }
+
+        function updateQueueSelectedCount() {
+            const count = selectedQueueItems.size;
+            const countElement = document.getElementById('queue-selected-count');
+            const deleteButton = document.getElementById('queue-bulk-delete-btn');
+
+            if (countElement) {
+                countElement.textContent = count + ' item' + (count !== 1 ? 's' : '') + ' selected';
+            }
+            if (deleteButton) {
+                deleteButton.disabled = count === 0;
+            }
+        }
+
+        function deleteSelectedQueueItems() {
+            if (selectedQueueItems.size === 0) {
+                showNotification('No items selected', true);
+                return;
+            }
+
+            if (!confirm('Are you sure you want to delete ' + selectedQueueItems.size + ' queue item(s)?')) {
+                return;
+            }
+
+            const itemIds = Array.from(selectedQueueItems);
+
+            fetch('/api/queue/delete-bulk', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ids: itemIds })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    showNotification('Deleted ' + data.count + ' queue item(s)');
+                    selectedQueueItems.clear();
+                    const selectAllCheckbox = document.getElementById('select-all-queue');
+                    if (selectAllCheckbox) {
+                        selectAllCheckbox.checked = false;
+                    }
+                    loadQueue();
+                    loadTree();
+                } else {
+                    showNotification('Error: ' + data.message, true);
+                }
+            })
+            .catch(err => {
+                showNotification('Error: ' + err.message, true);
+            });
+        }
+
         function deleteQueueItem(itemId) {
             if (!confirm('Are you sure you want to delete this queue item?')) {
                 return;
@@ -711,6 +834,7 @@
             .then(data => {
                 if (data.success) {
                     showNotification('Queue item deleted');
+                    selectedQueueItems.delete(itemId);
                     loadQueue();
                     loadTree();
                 } else {

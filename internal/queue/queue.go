@@ -48,7 +48,7 @@ type Processor struct {
 	cfg             config.Config
 	log             *slog.Logger
 	mu              sync.RWMutex
-	active          map[uint]bool // track active queue items
+	active          map[uint]context.CancelFunc // track active queue items and their cancel functions
 	broadcaster     LogBroadcaster
 	htmlBroadcaster func(uint)
 }
@@ -60,7 +60,7 @@ func NewQueueProcessor(db *gorm.DB, cfg config.Config, log *slog.Logger) *Proces
 		cfg:             cfg,
 		log:             log,
 		mu:              sync.RWMutex{},
-		active:          make(map[uint]bool),
+		active:          make(map[uint]context.CancelFunc),
 		broadcaster:     nil, // Set via SetBroadcaster
 		htmlBroadcaster: nil, // Set via SetHTMLBroadcaster
 	}
@@ -74,6 +74,25 @@ func (qp *Processor) SetBroadcaster(broadcaster LogBroadcaster) {
 // SetHTMLBroadcaster sets the HTML broadcaster for queue item updates.
 func (qp *Processor) SetHTMLBroadcaster(fn func(uint)) {
 	qp.htmlBroadcaster = fn
+}
+
+// CancelQueueItem cancels a running queue item by calling its context cancel function.
+// Returns true if the item was actively processing and was cancelled, false otherwise.
+func (qp *Processor) CancelQueueItem(itemID uint) bool {
+	qp.mu.Lock()
+	defer qp.mu.Unlock()
+
+	cancelFunc, exists := qp.active[itemID]
+	if !exists || cancelFunc == nil {
+		return false
+	}
+
+	// Call the cancel function to stop the transcoding process
+	cancelFunc()
+	qp.log.Info("Cancelled queue item",
+		slog.Uint64("queue_item_id", uint64(itemID)))
+
+	return true
 }
 
 // broadcastHTML broadcasts an HTML update for a queue item.
@@ -224,11 +243,12 @@ func (qp *Processor) feedQueue(jobs chan<- *database.QueueItem) {
 
 	// Check if already active
 	qp.mu.Lock()
-	if qp.active[item.ID] {
+	if qp.active[item.ID] != nil {
 		qp.mu.Unlock()
 		return
 	}
-	qp.active[item.ID] = true
+	// Reserve this item with a placeholder (will be replaced with actual cancel func in processItem)
+	qp.active[item.ID] = func() {}
 	qp.mu.Unlock()
 
 	// Try to send to jobs channel (non-blocking)
@@ -260,6 +280,15 @@ func (qp *Processor) worker(ctx context.Context, workerID int, jobs <-chan *data
 
 // processItem processes a single queue item.
 func (qp *Processor) processItem(ctx context.Context, workerID int, item *database.QueueItem) {
+	// Create cancellable context for this queue item
+	itemCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Store the cancel function so it can be called if item is deleted
+	qp.mu.Lock()
+	qp.active[item.ID] = cancel
+	qp.mu.Unlock()
+
 	defer func() {
 		qp.mu.Lock()
 		delete(qp.active, item.ID)
@@ -280,13 +309,13 @@ func (qp *Processor) processItem(ctx context.Context, workerID int, item *databa
 	// Prepare transcoding job
 	job, prog := qp.prepareTranscodeJob(0, item, mediaInfo)
 
-	// Execute transcoding
-	if !qp.executeTranscode(ctx, workerID, item, job, prog) {
+	// Execute transcoding with cancellable context
+	if !qp.executeTranscode(itemCtx, workerID, item, job, prog) {
 		return
 	}
 
 	// Post-processing
-	qp.postProcessTranscode(ctx, workerID, item)
+	qp.postProcessTranscode(itemCtx, workerID, item)
 }
 
 // initializeProcessing sets up the queue item for processing.
@@ -450,6 +479,32 @@ func (qp *Processor) executeTranscode(
 	if transcodeErr = runner.Transcode(ctx, qp.cfg, job, workerID, prog, func(msg string) {
 		qp.logAndBroadcast(item.ID, item.FileID, "info", msg)
 	}, qp.log); transcodeErr != nil {
+		// Check if the error is due to context cancellation
+		if errors.Is(transcodeErr, context.Canceled) {
+			qp.logAndBroadcast(item.ID, item.FileID, "info", "Transcoding cancelled by user")
+			qp.log.Info("Queue item cancelled",
+				slog.Int("worker_id", workerID),
+				slog.Uint64("queue_item_id", uint64(item.ID)))
+
+			// Update queue item status to cancelled
+			var statusErr error
+			if statusErr = database.UpdateQueueItemStatus(qp.db, item.ID, "cancelled", "Cancelled by user"); statusErr != nil {
+				qp.log.Error("Failed to update queue item status to cancelled",
+					slog.Int("worker_id", workerID),
+					slog.Uint64("queue_item_id", uint64(item.ID)),
+					slog.Any("error", statusErr))
+			}
+
+			// Broadcast queue updated event
+			if qp.broadcaster != nil {
+				qp.broadcaster.BroadcastQueueUpdated(item.ID, item.FileID, "cancelled")
+			}
+			qp.broadcastHTML(item.ID)
+
+			return false
+		}
+
+		// Regular error (not cancellation)
 		errMsg := fmt.Sprintf("transcoding failed: %v", transcodeErr)
 		qp.logAndBroadcast(item.ID, item.FileID, "error", errMsg)
 		qp.handleProcessingError(workerID, item, errMsg)

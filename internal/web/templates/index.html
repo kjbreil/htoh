@@ -92,6 +92,13 @@
         </div>
 
         <div id="queue-tab" class="tab-content">
+            <div class="bulk-actions">
+                <label style="margin-right: 15px;">
+                    <input type="checkbox" id="select-all-queue" onchange="toggleSelectAllQueue()"> Select All
+                </label>
+                <span id="queue-selected-count" style="color: #888; margin-right: 15px;">0 items selected</span>
+                <button class="btn btn-delete" onclick="deleteSelectedQueueItems()" id="queue-bulk-delete-btn" disabled>Delete Selected</button>
+            </div>
             <div id="queue-container">
                 <div class="loading">
                     <div class="spinner"></div>

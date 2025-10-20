@@ -125,6 +125,7 @@ func (s *Server) Start(ctx context.Context, port int) error {
 	mux.HandleFunc("/api/queue", s.handleQueue)
 	mux.HandleFunc("/api/queue/item", s.handleQueueItem)
 	mux.HandleFunc("/api/queue/delete", s.handleQueueDelete)
+	mux.HandleFunc("/api/queue/delete-bulk", s.handleQueueDeleteBulk)
 	mux.HandleFunc("/api/queue/logs", s.handleQueueLogs)
 
 	// Quality profile routes
@@ -771,6 +772,13 @@ func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cancel the running process if it's currently being processed
+	cancelled := s.queueProc.CancelQueueItem(uint(id))
+	if cancelled {
+		s.log.Info("Cancelled running transcode process for queue item",
+			slog.Uint64("queue_item_id", id))
+	}
+
 	// Delete task logs first
 	if err := database.DeleteTaskLogsByQueueItem(s.db, uint(id)); err != nil {
 		http.Error(w, fmt.Sprintf("failed to delete task logs: %v", err), http.StatusInternalServerError)
@@ -785,12 +793,98 @@ func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"message": "Queue item deleted successfully",
+		"success":   true,
+		"message":   "Queue item deleted successfully",
+		"cancelled": cancelled,
 	}); err != nil {
 		s.log.Error("Failed to encode JSON response",
 			slog.String("endpoint", "/api/queue/delete"),
 			slog.Any("error", err))
+	}
+}
+
+// handleQueueDeleteBulk handles deletion of multiple queue items.
+func (s *Server) handleQueueDeleteBulk(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request body
+	var requestBody struct {
+		IDs []uint `json:"ids"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if len(requestBody.IDs) == 0 {
+		http.Error(w, "no IDs provided", http.StatusBadRequest)
+		return
+	}
+
+	// Delete each queue item
+	var successCount int
+	var cancelledCount int
+	var lastError error
+
+	for _, id := range requestBody.IDs {
+		// Cancel the running process if it's currently being processed
+		if s.queueProc.CancelQueueItem(id) {
+			cancelledCount++
+			s.log.Info("Cancelled running transcode process for queue item",
+				slog.Uint64("queue_item_id", uint64(id)))
+		}
+
+		// Delete task logs first
+		if err := database.DeleteTaskLogsByQueueItem(s.db, id); err != nil {
+			lastError = err
+			s.log.Error("Failed to delete task logs",
+				slog.Uint64("queue_item_id", uint64(id)),
+				slog.Any("error", err))
+			continue
+		}
+
+		// Delete queue item
+		if err := database.DeleteQueueItem(s.db, id); err != nil {
+			lastError = err
+			s.log.Error("Failed to delete queue item",
+				slog.Uint64("queue_item_id", uint64(id)),
+				slog.Any("error", err))
+			continue
+		}
+
+		successCount++
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if successCount == 0 && lastError != nil {
+		var encodeErr error
+		if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   false,
+			"message":   lastError.Error(),
+			"count":     0,
+			"cancelled": cancelledCount,
+		}); encodeErr != nil {
+			s.log.Error("Failed to encode JSON response",
+				slog.String("endpoint", "/api/queue/delete-bulk"),
+				slog.Any("error", encodeErr))
+		}
+		return
+	}
+
+	var encodeErr error
+	if encodeErr = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   true,
+		"count":     successCount,
+		"cancelled": cancelledCount,
+		"message":   fmt.Sprintf("Deleted %d queue item(s), cancelled %d running process(es)", successCount, cancelledCount),
+	}); encodeErr != nil {
+		s.log.Error("Failed to encode JSON response",
+			slog.String("endpoint", "/api/queue/delete-bulk"),
+			slog.Any("error", encodeErr))
 	}
 }
 
